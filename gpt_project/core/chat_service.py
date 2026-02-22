@@ -25,7 +25,7 @@ If runtime date/time context is provided, use it for questions about today's dat
 If local notes and web results do not cover a question, use your general model knowledge and be clear when uncertain.
 Never answer with only 'I don't know based on my notes'.
 For questions about latest/current/live information, do not give outdated cutoff-style answers (for example 'as of 2023').
-If live data is unavailable for a current-events question, clearly say live retrieval is unavailable right now.
+If live data retrieval fails, still provide a useful best-effort answer and clearly label uncertainty.
 Always attempt live/web retrieval before answering.
 Use the user profile context to remember the user's name, facts they shared, and mirror their writing style."""
 
@@ -63,6 +63,9 @@ LIVE_RETRIEVAL_REFUSAL_HINTS = {
 }
 
 MARKET_DEFLECTION_HINTS = {
+    "live market retrieval is unavailable",
+    "market retrieval is unavailable",
+    "live retrieval is unavailable",
     "check platforms like",
     "you can check platforms like",
     "you can check yahoo finance",
@@ -522,14 +525,41 @@ class ChatService:
             return "Live weather context:\n- Weather lookup failed for this request.\n\n"
 
     def _extract_symbols_from_question(self, question: str) -> list[str]:
-        # Pick common uppercase ticker-style tokens.
+        # Pick uppercase ticker-style tokens, $-prefixed symbols, and common lowercase ticker mentions.
+        dollar_tokens = [m.upper() for m in re.findall(r"\$([A-Za-z]{1,5})\b", question)]
         candidates = re.findall(r"\b[A-Z]{1,5}\b", question)
+        lowered = question.lower()
+        common = [
+            "spy",
+            "qqq",
+            "dia",
+            "iwm",
+            "aapl",
+            "msft",
+            "nvda",
+            "tsla",
+            "amzn",
+            "meta",
+            "googl",
+            "gspc",
+            "dji",
+            "ixic",
+        ]
+        common_hits = [sym.upper() for sym in common if re.search(rf"\b{re.escape(sym)}\b", lowered)]
         deny = {"I", "A", "AN", "THE", "AND", "OR", "IT", "WE", "YOU"}
-        symbols = [c for c in candidates if c not in deny]
+        symbols = [c for c in dollar_tokens + candidates + common_hits if c not in deny]
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for symbol in symbols:
+            if symbol in seen:
+                continue
+            seen.add(symbol)
+            deduped.append(symbol)
+        symbols = deduped
         return symbols[:8]
 
     def _live_market_context(self, question: str) -> str:
-        default_symbols = ["SPY", "QQQ", "DIA", "IWM", "AAPL", "MSFT", "NVDA", "TSLA"]
+        default_symbols = ["SPY", "QQQ", "DIA", "IWM", "AAPL", "MSFT", "NVDA", "TSLA", "GSPC", "DJI", "IXIC"]
         symbols = self._extract_symbols_from_question(question) or default_symbols
         lines: list[str] = []
 
@@ -635,9 +665,13 @@ class ChatService:
         lines = []
         for line in (market_context or "").splitlines():
             clean = line.strip()
-            if clean.startswith("- ") and "price=" in clean or "close=" in clean:
+            if clean.startswith("- ") and ("price=" in clean or "close=" in clean):
                 lines.append(clean)
         return lines[:5]
+
+    def _answer_contains_market_snapshot(self, answer: str) -> bool:
+        text = (answer or "").lower()
+        return "latest market snapshot" in text or bool(re.search(r"\b[a-z0-9\^]{1,6}\s*:\s*(price|close)\s*=", text))
 
     def _market_answer_fallback(self, market_context: str, web_results: list[dict]) -> str:
         market_lines = self._extract_market_lines(market_context)
@@ -652,7 +686,10 @@ class ChatService:
                     "I could not pull structured quotes this second, but current market sources are reporting updates now: "
                     f"{joined}. Ask for SPY, QQQ, or a specific ticker for a focused update."
                 )
-        return ""
+        return (
+            "I cannot confirm exact live quotes at this second, but I can still help with a best-effort market read. "
+            "If you share a ticker (for example SPY, QQQ, AAPL, or TSLA), I will give a focused breakdown and what to watch next."
+        )
 
     def _topic_news_context(self, question: str) -> str:
         # Direct topic RSS fallback for "latest news on X" style questions.
@@ -795,10 +832,24 @@ class ChatService:
                 weather_context.strip()
             )
             if not has_live_signal:
-                answer = (
-                    "I cannot fetch live data right now, so I cannot verify the latest updates yet. "
-                    "Please try again in a moment with web access enabled."
-                )
+                if self._needs_market_context(question):
+                    answer = self._market_answer_fallback(market_context=market_context, web_results=web_results)
+                else:
+                    stale_fix_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+                    stale_fix_messages.extend(self._trim_history(effective_history))
+                    stale_fix_messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"{runtime_context}"
+                                f"{profile_context}"
+                                f"Question: {question}\n\n"
+                                "Give a useful best-effort answer without claiming live retrieval is unavailable. "
+                                "Be explicit about uncertainty, but still answer directly."
+                            ),
+                        }
+                    )
+                    answer = self.llm.chat(messages=stale_fix_messages)
             else:
                 stale_fix_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
                 stale_fix_messages.extend(self._trim_history(effective_history))
@@ -821,7 +872,7 @@ class ChatService:
 
         if self._needs_market_context(question):
             forced = self._market_answer_fallback(market_context=market_context, web_results=web_results)
-            if forced and self._looks_like_market_deflection(answer):
+            if forced and (self._looks_like_market_deflection(answer) or not self._answer_contains_market_snapshot(answer)):
                 answer = forced
 
         answer = self._normalize_response_punctuation(answer)
