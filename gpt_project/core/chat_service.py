@@ -53,6 +53,27 @@ NOTES_REFUSAL_HINTS = {
     "based on current notes",
 }
 
+LIVE_RETRIEVAL_REFUSAL_HINTS = {
+    "can't retrieve live",
+    "cannot retrieve live",
+    "can't pull live",
+    "cannot pull live",
+    "can't provide live",
+    "cannot provide live",
+}
+
+MARKET_DEFLECTION_HINTS = {
+    "check platforms like",
+    "you can check platforms like",
+    "you can check yahoo finance",
+    "i can't retrieve live stock market data",
+    "i cannot retrieve live stock market data",
+    "i can't pull live market data",
+    "i cannot pull live market data",
+    "i can't provide live market data",
+    "i cannot provide live market data",
+}
+
 WEATHER_QUERY_HINTS = {
     "weather",
     "temperature",
@@ -350,6 +371,16 @@ class ChatService:
         text = answer.lower()
         return any(hint in text for hint in NOTES_REFUSAL_HINTS)
 
+    def _looks_like_live_retrieval_refusal(self, answer: str) -> bool:
+        text = (answer or "").lower()
+        return any(hint in text for hint in LIVE_RETRIEVAL_REFUSAL_HINTS)
+
+    def _looks_like_market_deflection(self, answer: str) -> bool:
+        text = (answer or "").lower()
+        return any(hint in text for hint in MARKET_DEFLECTION_HINTS) or self._looks_like_live_retrieval_refusal(
+            answer
+        )
+
     def _looks_stale_current_answer(self, answer: str) -> bool:
         text = (answer or "").lower()
         return any(hint in text for hint in STALE_ANSWER_HINTS)
@@ -600,6 +631,29 @@ class ChatService:
                 lines.append(f"- {title} ({pub_date}) {link}")
         return "\n".join(lines) + "\n\n"
 
+    def _extract_market_lines(self, market_context: str) -> list[str]:
+        lines = []
+        for line in (market_context or "").splitlines():
+            clean = line.strip()
+            if clean.startswith("- ") and "price=" in clean or "close=" in clean:
+                lines.append(clean)
+        return lines[:5]
+
+    def _market_answer_fallback(self, market_context: str, web_results: list[dict]) -> str:
+        market_lines = self._extract_market_lines(market_context)
+        if market_lines:
+            body = "\n".join(market_lines[:4])
+            return f"Here is the latest market snapshot I found:\n{body}\n\nAsk for a specific ticker if you want a deeper breakdown."
+        if web_results:
+            titles = [item.get("title", "").strip() for item in web_results[:3] if item.get("title")]
+            if titles:
+                joined = "; ".join(titles)
+                return (
+                    "I could not pull structured quotes this second, but current market sources are reporting updates now: "
+                    f"{joined}. Ask for SPY, QQQ, or a specific ticker for a focused update."
+                )
+        return ""
+
     def _topic_news_context(self, question: str) -> str:
         # Direct topic RSS fallback for "latest news on X" style questions.
         q = question.strip()
@@ -764,6 +818,11 @@ class ChatService:
                     }
                 )
                 answer = self.llm.chat(messages=stale_fix_messages)
+
+        if self._needs_market_context(question):
+            forced = self._market_answer_fallback(market_context=market_context, web_results=web_results)
+            if forced and self._looks_like_market_deflection(answer):
+                answer = forced
 
         answer = self._normalize_response_punctuation(answer)
 
