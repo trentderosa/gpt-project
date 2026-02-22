@@ -234,6 +234,33 @@
     }
     .user { align-self: flex-end; background: var(--user); border-color: #bfd9fb; }
     .bot { align-self: flex-start; background: var(--bot); }
+    .thinking {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--muted);
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }
+    .thinking-dots {
+      display: inline-flex;
+      gap: 5px;
+      align-items: center;
+    }
+    .thinking-dots span {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: #7eb7ff;
+      opacity: 0.3;
+      animation: thinkingPulse 1s infinite ease-in-out;
+    }
+    .thinking-dots span:nth-child(2) { animation-delay: 0.14s; }
+    .thinking-dots span:nth-child(3) { animation-delay: 0.28s; }
+    @keyframes thinkingPulse {
+      0%, 100% { opacity: 0.25; transform: translateY(0); }
+      40% { opacity: 0.95; transform: translateY(-2px); }
+    }
     .meta {
       align-self: center;
       color: var(--muted);
@@ -489,6 +516,7 @@
     let userLocationLabel = null;
     let pendingFiles = [];
     let uploadedFileNames = [];
+    let thinkingEl = null;
 
     function fileSizeLabel(bytes) {
       const size = Number(bytes || 0);
@@ -659,6 +687,25 @@
       chatEl.scrollTop = chatEl.scrollHeight;
     }
 
+    function showThinking() {
+      hideThinking();
+      const div = document.createElement("div");
+      div.className = "bubble bot";
+      div.setAttribute("data-thinking", "true");
+      div.innerHTML = '<div class="thinking"><span>Cortex Engine is thinking</span><span class="thinking-dots"><span></span><span></span><span></span></span></div>';
+      chatEl.appendChild(div);
+      thinkingEl = div;
+      pruneChatIfNeeded();
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    function hideThinking() {
+      if (thinkingEl && thinkingEl.parentNode) {
+        thinkingEl.parentNode.removeChild(thinkingEl);
+      }
+      thinkingEl = null;
+    }
+
     function initLocationHint() {
       if (!navigator.geolocation) return;
       navigator.geolocation.getCurrentPosition(
@@ -677,6 +724,7 @@
     async function sendMessage(message) {
       sendEl.disabled = true;
       attachBtnEl.disabled = true;
+      showThinking();
       try {
         // Upload selected files first so they can be used in this turn.
         if (pendingFiles.length) {
@@ -724,6 +772,7 @@
       } catch (err) {
         addBubble("Error: " + err.message, "bot", "error");
       } finally {
+        hideThinking();
         sendEl.disabled = false;
         attachBtnEl.disabled = false;
         promptEl.focus();
