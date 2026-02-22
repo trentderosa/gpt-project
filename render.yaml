@@ -1,0 +1,37 @@
+services:
+  - type: web
+    name: trent-gpt-web
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python run_api.py
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: "10000"
+      - key: UVICORN_RELOAD
+        value: "false"
+      - key: LIVE_UPDATE_ENABLED
+        value: "true"
+      - key: RUN_UPDATER_IN_API
+        value: "true"
+      - key: LIVE_UPDATE_INTERVAL_SECONDS
+        value: "300"
+      - key: STOCK_SYMBOLS
+        value: "AAPL,MSFT,SPY,TSLA,NVDA"
+      - key: WEB_SEARCH_PROVIDER
+        value: duckduckgo
+      - key: APP_BASE_URL
+        value: https://trent-gpt-web.onrender.com
+      - key: CREATOR_EMAIL
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_PRO5_ID
+        sync: false
+      - key: STRIPE_PRICE_PRO10_ID
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false

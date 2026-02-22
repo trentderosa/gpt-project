@@ -1,0 +1,928 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trent GPT - Created by Trent DeRosa</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-a: #eef6ff;
+      --bg-b: #dceeff;
+      --bg-c: #cfe4ff;
+      --ink: #10233c;
+      --muted: #4b6483;
+      --panel: #ffffffd4;
+      --line: #cad8ea;
+      --brand: #4f9dff;
+      --brand-soft: #d7e9ff;
+      --user: #eef6ff;
+      --bot: #ffffff;
+      --error: #9d2f2f;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Manrope", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(900px 600px at 12% 8%, var(--bg-c), transparent 60%),
+        radial-gradient(1000px 700px at 90% 90%, var(--bg-b), transparent 65%),
+        linear-gradient(145deg, var(--bg-a), #eef5f1);
+      min-height: 100vh;
+      display: block;
+      overflow: hidden;
+    }
+    .bg-grid {
+      position: fixed;
+      inset: 0;
+      background-image: linear-gradient(#ffffff20 1px, transparent 1px), linear-gradient(90deg, #ffffff20 1px, transparent 1px);
+      background-size: 26px 26px;
+      pointer-events: none;
+      mask-image: radial-gradient(circle at center, black 35%, transparent 85%);
+    }
+    .app {
+      width: 100vw;
+      height: 100vh;
+      border-radius: 0;
+      border: none;
+      background: var(--panel);
+      backdrop-filter: blur(12px);
+      box-shadow: none;
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      overflow: hidden;
+      transform: translateY(14px);
+      opacity: 0;
+      animation: fadeIn 450ms ease forwards;
+    }
+    @keyframes fadeIn {
+      to { transform: translateY(0); opacity: 1; }
+    }
+    aside {
+      border-right: 1px solid var(--line);
+      padding: 22px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      background: #fbfffcaa;
+    }
+    .logo {
+      font-family: "Space Grotesk", sans-serif;
+      font-size: 27px;
+      letter-spacing: 0.2px;
+      font-weight: 700;
+    }
+    .tag {
+      margin-top: -8px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .controls {
+      margin-top: 8px;
+      display: grid;
+      gap: 10px;
+    }
+    .auth-box {
+      margin-top: 4px;
+      border: 1px solid var(--line);
+      background: #ffffffd6;
+      border-radius: 12px;
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+    }
+    .auth-box input {
+      font-size: 12px;
+      padding: 8px 10px;
+    }
+    .auth-actions {
+      display: flex;
+      gap: 8px;
+    }
+    .plan-actions {
+      display: flex;
+      gap: 8px;
+    }
+    .plan-actions button {
+      flex: 1;
+      border: 1px solid #b9d8ff;
+      background: #edf6ff;
+      color: #1a4f83;
+      border-radius: 9px;
+      padding: 7px 8px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .auth-actions button {
+      flex: 1;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      border-radius: 9px;
+      padding: 7px 8px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .auth-user {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+    .toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+    .btn {
+      background: linear-gradient(135deg, #66b2ff, #4f9dff);
+      color: white;
+      border: none;
+      border-radius: 12px;
+      padding: 10px 12px;
+      font-weight: 700;
+      cursor: pointer;
+      font-family: "Space Grotesk", sans-serif;
+    }
+    .btn:hover { filter: brightness(1.03); }
+    main {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      min-width: 0;
+      min-height: 0;
+    }
+    header {
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .title {
+      font-family: "Space Grotesk", sans-serif;
+      font-weight: 700;
+      font-size: 18px;
+    }
+    .sub {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    #chat {
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-height: 0;
+    }
+    .bubble {
+      max-width: 84%;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 12px 14px;
+      line-height: 1.55;
+      box-shadow: 0 3px 12px #0f302109;
+      animation: pop 170ms ease;
+      font-size: 15px;
+    }
+    .bubble-content p { margin: 0 0 10px 0; }
+    .bubble-content p:last-child { margin-bottom: 0; }
+    .bubble-content ul {
+      margin: 0 0 10px 18px;
+      padding: 0;
+    }
+    .bubble-content li { margin: 0 0 5px 0; }
+    .bubble-content code {
+      background: #eef4ff;
+      border: 1px solid #d6e4ff;
+      border-radius: 6px;
+      padding: 1px 6px;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 13px;
+    }
+    .bubble-content pre {
+      margin: 8px 0 10px;
+      padding: 10px;
+      border-radius: 10px;
+      border: 1px solid #d9e5fa;
+      background: #f8fbff;
+      overflow-x: auto;
+    }
+    .bubble-content pre code {
+      border: none;
+      background: transparent;
+      padding: 0;
+      font-size: 12px;
+    }
+    .bubble img {
+      max-width: min(100%, 560px);
+      border-radius: 10px;
+      margin-top: 8px;
+      border: 1px solid var(--line);
+      display: block;
+    }
+    @keyframes pop {
+      from { transform: translateY(6px); opacity: 0.25; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    .user { align-self: flex-end; background: var(--user); border-color: #bfd9fb; }
+    .bot { align-self: flex-start; background: var(--bot); }
+    .meta {
+      align-self: center;
+      color: var(--muted);
+      font-size: 12px;
+      padding: 2px 0 4px;
+    }
+    .error { color: var(--error); }
+    form {
+      border-top: 1px solid var(--line);
+      padding: 12px;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      grid-template-rows: auto auto;
+      gap: 10px;
+      background: #ffffffc8;
+    }
+    #prompt {
+      grid-column: 2;
+      grid-row: 1;
+    }
+    #attachBtn {
+      grid-column: 1;
+      grid-row: 1;
+    }
+    #send {
+      grid-column: 3;
+      grid-row: 1;
+    }
+    .attachment-tray {
+      grid-column: 1 / -1;
+      grid-row: 2;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      min-height: 0;
+    }
+    .attachment-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid #bfd9fb;
+      background: #eef6ff;
+      color: #23476d;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      max-width: 100%;
+    }
+    .attachment-name {
+      max-width: 260px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 700;
+    }
+    .attachment-state {
+      color: #416993;
+      font-size: 11px;
+    }
+    .attachment-remove {
+      border: none;
+      background: transparent;
+      color: #2d5b8a;
+      cursor: pointer;
+      font-size: 14px;
+      line-height: 1;
+      padding: 0;
+    }
+    .attachment-chip.uploaded {
+      background: #e8fff3;
+      border-color: #b8eccf;
+      color: #1f5c3f;
+    }
+    input, button {
+      font: inherit;
+      border-radius: 12px;
+      padding: 11px 12px;
+    }
+    input {
+      border: 1px solid var(--line);
+      background: #fff;
+      outline: none;
+    }
+    input:focus { border-color: #9bc8ff; box-shadow: 0 0 0 3px #9bc8ff44; }
+    button.send {
+      border: none;
+      background: var(--brand);
+      color: white;
+      font-weight: 700;
+      cursor: pointer;
+      min-width: 90px;
+      font-family: "Space Grotesk", sans-serif;
+    }
+    .attach-btn {
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      font-weight: 700;
+      min-width: 80px;
+      cursor: pointer;
+      font-family: "Space Grotesk", sans-serif;
+    }
+    button:disabled { opacity: 0.7; cursor: default; }
+    @media (max-width: 920px) {
+      .app { grid-template-columns: 1fr; height: 100vh; width: 100vw; }
+      aside { border-right: none; border-bottom: 1px solid var(--line); padding: 12px; gap: 8px; }
+      .logo { font-size: 22px; }
+      .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+      #chat { padding-bottom: 18px; }
+    }
+    .history-wrap {
+      min-height: 0;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      margin-top: 4px;
+    }
+    .legal-links {
+      margin-top: auto;
+      display: flex;
+      gap: 10px;
+      font-size: 12px;
+      color: var(--muted);
+      padding-top: 8px;
+    }
+    .legal-links a {
+      color: #2e6fb0;
+      text-decoration: none;
+      font-weight: 700;
+    }
+    .legal-links a:hover { text-decoration: underline; }
+    .history-title {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .history-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      overflow-y: auto;
+      display: grid;
+      gap: 6px;
+      max-height: 320px;
+    }
+    .history-item button {
+      width: 100%;
+      text-align: left;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-size: 12px;
+      line-height: 1.3;
+      cursor: pointer;
+    }
+    .history-item button.active {
+      border-color: #88bcff;
+      background: #e9f3ff;
+    }
+    .history-preview {
+      display: block;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-weight: 600;
+    }
+    .history-time {
+      display: block;
+      color: var(--muted);
+      margin-top: 3px;
+    }
+  </style>
+</head>
+<body>
+  <div class="bg-grid"></div>
+  <div class="app">
+    <aside>
+      <div class="logo">Trent GPT</div>
+      <div class="tag">Created by Trent DeRosa</div>
+      <div class="controls">
+        <label class="toggle"><input id="webSearch" type="checkbox" checked> Web search enabled</label>
+        <button id="newChat" class="btn" type="button">Start New Chat</button>
+      </div>
+      <div class="auth-box">
+        <input id="authEmail" type="email" placeholder="Email" autocomplete="username">
+        <input id="authPassword" type="password" placeholder="Password" autocomplete="current-password">
+        <div class="auth-actions">
+          <button id="loginBtn" type="button">Login</button>
+          <button id="registerBtn" type="button">Register</button>
+        </div>
+        <div class="plan-actions" id="planActions" style="display:none;">
+          <button id="upgradePro5Btn" type="button">Upgrade $5</button>
+          <button id="upgradePro10Btn" type="button">Upgrade $10</button>
+        </div>
+        <button id="logoutBtn" type="button" class="btn" style="display:none;padding:8px 10px;">Logout</button>
+        <div id="authStatus" class="auth-user">Not logged in. Free mode may be limited.</div>
+      </div>
+      <div class="history-wrap">
+        <div class="history-title">Past Conversations</div>
+        <ul id="historyList" class="history-list"></ul>
+      </div>
+      <div class="legal-links">
+        <a href="/privacy" target="_blank" rel="noopener">Privacy</a>
+        <a href="/terms" target="_blank" rel="noopener">Terms</a>
+      </div>
+    </aside>
+    <main>
+      <header>
+        <div>
+          <div class="title">Conversation</div>
+        </div>
+      </header>
+      <section id="chat"></section>
+      <form id="form">
+        <button id="attachBtn" class="attach-btn" type="button">Attach</button>
+        <input id="fileInput" type="file" multiple style="display:none" />
+        <input id="prompt" autocomplete="off" placeholder="Ask anything..." />
+        <button id="send" class="send" type="submit">Send</button>
+        <div id="attachmentTray" class="attachment-tray" aria-live="polite"></div>
+      </form>
+    </main>
+  </div>
+  <script>
+    const chatEl = document.getElementById("chat");
+    const formEl = document.getElementById("form");
+    const promptEl = document.getElementById("prompt");
+    const sendEl = document.getElementById("send");
+    const attachBtnEl = document.getElementById("attachBtn");
+    const fileInputEl = document.getElementById("fileInput");
+    const attachmentTrayEl = document.getElementById("attachmentTray");
+    const newChatEl = document.getElementById("newChat");
+    const webSearchEl = document.getElementById("webSearch");
+    const historyListEl = document.getElementById("historyList");
+    const authEmailEl = document.getElementById("authEmail");
+    const authPasswordEl = document.getElementById("authPassword");
+    const loginBtnEl = document.getElementById("loginBtn");
+    const registerBtnEl = document.getElementById("registerBtn");
+    const logoutBtnEl = document.getElementById("logoutBtn");
+    const planActionsEl = document.getElementById("planActions");
+    const upgradePro5BtnEl = document.getElementById("upgradePro5Btn");
+    const upgradePro10BtnEl = document.getElementById("upgradePro10Btn");
+    const authStatusEl = document.getElementById("authStatus");
+    const KEY = "trent_gpt_conversation_id";
+    const AUTH_KEY = "trent_gpt_auth_token";
+    let conversationId = localStorage.getItem(KEY) || null;
+    let authToken = localStorage.getItem(AUTH_KEY) || null;
+    let currentUser = null;
+    const MAX_RENDERED_ITEMS = 220;
+    const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+    const browserUtcOffsetMinutes = new Date().getTimezoneOffset();
+    let userLocationLabel = null;
+    let pendingFiles = [];
+    let uploadedFileNames = [];
+
+    function fileSizeLabel(bytes) {
+      const size = Number(bytes || 0);
+      if (size < 1024) return `${size} B`;
+      if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+      return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    function renderAttachmentTray() {
+      attachmentTrayEl.innerHTML = "";
+      for (let i = 0; i < pendingFiles.length; i++) {
+        const file = pendingFiles[i];
+        const chip = document.createElement("div");
+        chip.className = "attachment-chip";
+        chip.innerHTML = `<span class="attachment-name">${escapeHtml(file.name)}</span><span class="attachment-state">ready • ${fileSizeLabel(file.size)}</span>`;
+        const removeBtn = document.createElement("button");
+        removeBtn.type = "button";
+        removeBtn.className = "attachment-remove";
+        removeBtn.title = "Remove attachment";
+        removeBtn.textContent = "×";
+        removeBtn.addEventListener("click", () => {
+          pendingFiles.splice(i, 1);
+          const dt = new DataTransfer();
+          for (const f of pendingFiles) dt.items.add(f);
+          fileInputEl.files = dt.files;
+          renderAttachmentTray();
+        });
+        chip.appendChild(removeBtn);
+        attachmentTrayEl.appendChild(chip);
+      }
+
+      for (const name of uploadedFileNames.slice(-3)) {
+        const chip = document.createElement("div");
+        chip.className = "attachment-chip uploaded";
+        chip.innerHTML = `<span class="attachment-name">${escapeHtml(name)}</span><span class="attachment-state">uploaded</span>`;
+        attachmentTrayEl.appendChild(chip);
+      }
+    }
+
+    function pruneChatIfNeeded() {
+      while (chatEl.children.length > MAX_RENDERED_ITEMS) {
+        chatEl.removeChild(chatEl.firstChild);
+      }
+    }
+
+    async function apiFetch(url, options = {}) {
+      const opts = { ...options };
+      const headers = { ...(opts.headers || {}) };
+      if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
+      opts.headers = headers;
+      return fetch(url, opts);
+    }
+
+    function setAuthState(user, token = null) {
+      currentUser = user || null;
+      if (token !== null) {
+        authToken = token;
+        if (authToken) localStorage.setItem(AUTH_KEY, authToken);
+        else localStorage.removeItem(AUTH_KEY);
+      }
+      const loggedIn = !!currentUser;
+      authEmailEl.style.display = loggedIn ? "none" : "";
+      authPasswordEl.style.display = loggedIn ? "none" : "";
+      loginBtnEl.style.display = loggedIn ? "none" : "";
+      registerBtnEl.style.display = loggedIn ? "none" : "";
+      logoutBtnEl.style.display = loggedIn ? "" : "none";
+      planActionsEl.style.display = loggedIn ? "" : "none";
+      if (!loggedIn) {
+        authStatusEl.textContent = "Not logged in. Free mode may be limited.";
+      }
+    }
+
+    async function refreshMe() {
+      if (!authToken) {
+        setAuthState(null, null);
+        return;
+      }
+      try {
+        const res = await apiFetch("/auth/me");
+        if (!res.ok) throw new Error("auth");
+        const data = await res.json();
+        setAuthState(data.user);
+        const limits = data.limits || {};
+        const inputCap = limits.inputs_per_hour == null ? "unlimited" : `${limits.inputs_per_hour}/hour`;
+        const imageCap = limits.images_per_hour == null ? "unlimited" : `${limits.images_per_hour}/hour`;
+        authStatusEl.textContent = `${data.user.email} • ${data.user.plan} • prompts: ${inputCap} • images: ${imageCap} • used: ${data.usage_last_hour}`;
+      } catch (_) {
+        setAuthState(null, null);
+      }
+    }
+
+    function addBubble(text, role = "bot", extraClass = "") {
+      const div = document.createElement("div");
+      div.className = `bubble ${role} ${extraClass}`.trim();
+      const content = document.createElement("div");
+      content.className = "bubble-content";
+      content.innerHTML = formatMessageText(text);
+      div.appendChild(content);
+      chatEl.appendChild(div);
+      pruneChatIfNeeded();
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    function escapeHtml(input) {
+      return String(input)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll("\"", "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    function formatInline(text) {
+      let out = escapeHtml(text);
+      out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
+      out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      return out;
+    }
+
+    function formatMessageText(text) {
+      const raw = String(text || "");
+      const withCodeBlocks = raw.replace(/```([\s\S]*?)```/g, (m, code) => {
+        return `\n<pre><code>${escapeHtml(code.trim())}</code></pre>\n`;
+      });
+      const lines = withCodeBlocks.split("\n");
+      const chunks = [];
+      let listBuffer = [];
+
+      const flushList = () => {
+        if (!listBuffer.length) return;
+        const items = listBuffer.map(item => `<li>${formatInline(item)}</li>`).join("");
+        chunks.push(`<ul>${items}</ul>`);
+        listBuffer = [];
+      };
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          flushList();
+          continue;
+        }
+        if (trimmed.startsWith("<pre><code>") && trimmed.endsWith("</code></pre>")) {
+          flushList();
+          chunks.push(trimmed);
+          continue;
+        }
+        if (trimmed.startsWith("- ")) {
+          listBuffer.push(trimmed.slice(2));
+          continue;
+        }
+        flushList();
+        chunks.push(`<p>${formatInline(trimmed)}</p>`);
+      }
+      flushList();
+      return chunks.join("");
+    }
+
+    function addImage(src, alt = "Generated image") {
+      const div = document.createElement("div");
+      div.className = "bubble bot";
+      const label = document.createElement("div");
+      label.textContent = "Generated image";
+      const img = document.createElement("img");
+      img.src = src;
+      img.alt = alt;
+      img.loading = "lazy";
+      div.appendChild(label);
+      div.appendChild(img);
+      chatEl.appendChild(div);
+      pruneChatIfNeeded();
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    function addMeta(text) {
+      const div = document.createElement("div");
+      div.className = "meta";
+      div.textContent = text;
+      chatEl.appendChild(div);
+      pruneChatIfNeeded();
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    function initLocationHint() {
+      if (!navigator.geolocation) return;
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const lat = pos.coords.latitude.toFixed(3);
+          const lon = pos.coords.longitude.toFixed(3);
+          userLocationLabel = `${lat}, ${lon}`;
+        },
+        () => {
+          userLocationLabel = null;
+        },
+        { enableHighAccuracy: false, timeout: 6000, maximumAge: 300000 }
+      );
+    }
+
+    async function sendMessage(message) {
+      sendEl.disabled = true;
+      attachBtnEl.disabled = true;
+      try {
+        // Upload selected files first so they can be used in this turn.
+        if (pendingFiles.length) {
+          for (const file of pendingFiles) {
+            const formData = new FormData();
+            formData.append("file", file);
+            if (conversationId) formData.append("conversation_id", conversationId);
+            const uploadRes = await apiFetch("/upload", { method: "POST", body: formData });
+            const uploadData = await uploadRes.json();
+            if (!uploadRes.ok) throw new Error(uploadData.detail || "Upload failed");
+            conversationId = uploadData.conversation_id;
+            localStorage.setItem(KEY, conversationId);
+            uploadedFileNames.push(uploadData.filename || file.name);
+            addMeta(`Attached ${uploadData.filename}`);
+          }
+          pendingFiles = [];
+          fileInputEl.value = "";
+          renderAttachmentTray();
+        }
+
+        const res = await apiFetch("/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message,
+            conversation_id: conversationId,
+            use_web_search: webSearchEl.checked,
+            user_timezone: browserTimeZone,
+            user_utc_offset_minutes: browserUtcOffsetMinutes,
+            user_location_label: userLocationLabel
+          })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Request failed");
+        conversationId = data.conversation_id;
+        localStorage.setItem(KEY, conversationId);
+        addBubble(data.answer, "bot");
+        if (data.generated_images?.length) {
+          for (const src of data.generated_images) {
+            addImage(src, "AI generated image");
+          }
+        }
+        if (data.retrieved_sources?.length) {
+          addMeta("Notes: " + data.retrieved_sources.map(s => `${s.source} (${s.score})`).join(", "));
+        }
+        if (data.web_results?.length) {
+          addMeta("Web: " + data.web_results.map(r => r.title || r.url).join(" | "));
+        }
+        await refreshConversationList();
+      } catch (err) {
+        addBubble("Error: " + err.message, "bot", "error");
+      } finally {
+        sendEl.disabled = false;
+        attachBtnEl.disabled = false;
+        promptEl.focus();
+      }
+    }
+
+    async function loadConversation() {
+      if (!conversationId) return;
+      try {
+        const res = await apiFetch(`/conversations/${conversationId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        chatEl.innerHTML = "";
+        for (const msg of data.messages.slice(-60)) {
+          addBubble(msg.content, msg.role === "user" ? "user" : "bot");
+        }
+        addMeta("Conversation restored.");
+      } catch (_) {
+        // Ignore restore failures and continue with a fresh visible window.
+      }
+    }
+
+    function fmtDate(value) {
+      if (!value) return "";
+      const normalized = `${String(value).replace(" ", "T")}Z`;
+      const dt = new Date(normalized);
+      if (Number.isNaN(dt.getTime())) return "";
+      return dt.toLocaleString();
+    }
+
+    async function refreshConversationList() {
+      try {
+        const res = await apiFetch("/conversations?limit=40");
+        if (!res.ok) return;
+        const data = await res.json();
+        historyListEl.innerHTML = "";
+        for (const convo of data.conversations || []) {
+          const li = document.createElement("li");
+          li.className = "history-item";
+          const btn = document.createElement("button");
+          if (convo.conversation_id === conversationId) btn.classList.add("active");
+          btn.innerHTML = `<span class="history-preview">${convo.preview || "New conversation"}</span><span class="history-time">${fmtDate(convo.last_message_at || convo.created_at)}</span>`;
+          btn.addEventListener("click", async () => {
+            conversationId = convo.conversation_id;
+            localStorage.setItem(KEY, conversationId);
+            await loadConversation();
+            await refreshConversationList();
+            promptEl.focus();
+          });
+          li.appendChild(btn);
+          historyListEl.appendChild(li);
+        }
+      } catch (_) {
+        // ignore history refresh errors
+      }
+    }
+
+    formEl.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const message = promptEl.value.trim();
+      if (!message) return;
+      promptEl.value = "";
+      addBubble(message, "user");
+      await sendMessage(message);
+    });
+
+    attachBtnEl.addEventListener("click", () => {
+      fileInputEl.click();
+    });
+
+    fileInputEl.addEventListener("change", () => {
+      pendingFiles = Array.from(fileInputEl.files || []);
+      renderAttachmentTray();
+    });
+
+    newChatEl.addEventListener("click", () => {
+      conversationId = null;
+      localStorage.removeItem(KEY);
+      chatEl.innerHTML = "";
+      pendingFiles = [];
+      uploadedFileNames = [];
+      fileInputEl.value = "";
+      renderAttachmentTray();
+      addMeta("New conversation started.");
+      refreshConversationList();
+      promptEl.focus();
+    });
+
+    loginBtnEl.addEventListener("click", async () => {
+      const email = authEmailEl.value.trim();
+      const password = authPasswordEl.value;
+      if (!email || !password) return;
+      try {
+        const res = await fetch("/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Login failed");
+        setAuthState(data.user, data.token);
+        authPasswordEl.value = "";
+        conversationId = null;
+        localStorage.removeItem(KEY);
+        chatEl.innerHTML = "";
+        addMeta("Logged in.");
+        await refreshMe();
+        await refreshConversationList();
+      } catch (err) {
+        addBubble("Error: " + err.message, "bot", "error");
+      }
+    });
+
+    registerBtnEl.addEventListener("click", async () => {
+      const email = authEmailEl.value.trim();
+      const password = authPasswordEl.value;
+      if (!email || !password) return;
+      try {
+        const res = await fetch("/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Registration failed");
+        setAuthState(data.user, data.token);
+        authPasswordEl.value = "";
+        conversationId = null;
+        localStorage.removeItem(KEY);
+        chatEl.innerHTML = "";
+        addMeta("Account created and logged in.");
+        await refreshMe();
+        await refreshConversationList();
+      } catch (err) {
+        addBubble("Error: " + err.message, "bot", "error");
+      }
+    });
+
+    logoutBtnEl.addEventListener("click", async () => {
+      try {
+        await apiFetch("/auth/logout", { method: "POST" });
+      } catch (_) {}
+      setAuthState(null, null);
+      conversationId = null;
+      localStorage.removeItem(KEY);
+      chatEl.innerHTML = "";
+      addMeta("Logged out.");
+      refreshConversationList();
+    });
+
+    async function startCheckout(plan) {
+      if (!authToken) {
+        addBubble("Error: Please log in first.", "bot", "error");
+        return;
+      }
+      try {
+        const res = await apiFetch("/billing/checkout", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ plan })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Could not start checkout");
+        if (!data.checkout_url) throw new Error("No checkout URL returned");
+        window.location.href = data.checkout_url;
+      } catch (err) {
+        addBubble("Error: " + err.message, "bot", "error");
+      }
+    }
+
+    upgradePro5BtnEl.addEventListener("click", () => startCheckout("pro5"));
+    upgradePro10BtnEl.addEventListener("click", () => startCheckout("pro10"));
+
+    initLocationHint();
+    Promise.all([refreshMe(), loadConversation(), refreshConversationList()]).finally(() => {
+      renderAttachmentTray();
+      if (!chatEl.children.length) {
+        addMeta("Created by Trent DeRosa. Ask anything.");
+      }
+    });
+  </script>
+</body>
+</html>

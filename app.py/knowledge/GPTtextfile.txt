@@ -1,0 +1,11 @@
+About Trent
+- Name: Trent Alexander DeRosa
+- School: James Madison University
+- Major: Computer Science
+- Minor: Data Analytics 
+- Interests: AI, DevOps, Python projects, fitness/training
+- Internship: Greystone IT Intern, starts June 1, 2026
+
+Rules for answering
+- If the answer is not in the context, say: "I don't know based on my notes."
+- Keep answers short and direct unless the user asks for detail.
