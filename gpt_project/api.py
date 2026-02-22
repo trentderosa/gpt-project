@@ -29,7 +29,7 @@ from .core.storage import ChatStorage
 from .jobs.updater import run_once
 
 
-app = FastAPI(title="Trent GPT API (Created by Trent DeRosa)", version="0.1.0")
+app = FastAPI(title="Cortex Engine API (Created by Trent DeRosa)", version="0.1.0")
 logger = logging.getLogger("trent_gpt_api")
 if not logger.handlers:
     handler = logging.StreamHandler()

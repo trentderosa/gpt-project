@@ -1,4 +1,4 @@
-# Trent GPT Deployment
+# Cortex Engine Deployment
 
 ## Goal
 Keep the app online 24/7 and keep live data (news/stocks) updated even when your laptop is off.

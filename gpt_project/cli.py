@@ -12,7 +12,7 @@ SMALL_TALK = {"hi", "hello", "hey", "yo", "sup", "what up"}
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Trent GPT - note grounded chat assistant")
+    parser = argparse.ArgumentParser(description="Cortex Engine - note grounded chat assistant")
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"OpenAI model (default: {DEFAULT_MODEL})")
     return parser.parse_args()
 
@@ -26,7 +26,7 @@ def main() -> None:
     llm = LLMWrapper(model=args.model)
     chat = ChatService(llm=llm, chunks=chunks)
 
-    print("Trent GPT running. Type 'exit' to quit.")
+    print("Cortex Engine running. Type 'exit' to quit.")
     print(f"Loaded {len(chunks)} chunks from {KNOWLEDGE_DIR}\n")
 
     while True:
