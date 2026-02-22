@@ -425,12 +425,12 @@
         <input id="authEmail" type="email" placeholder="Email" autocomplete="username">
         <input id="authPassword" type="password" placeholder="Password" autocomplete="current-password">
         <div class="auth-actions">
-          <button id="loginBtn" type="button">Login</button>
-          <button id="registerBtn" type="button">Register</button>
+          <button id="continueAuthBtn" type="button">Continue</button>
         </div>
         <div class="plan-actions" id="planActions" style="display:none;">
           <button id="upgradePro5Btn" type="button">Upgrade $5</button>
           <button id="upgradePro10Btn" type="button">Upgrade $10</button>
+          <button id="manageBillingBtn" type="button">Manage Billing</button>
         </div>
         <button id="logoutBtn" type="button" class="btn" style="display:none;padding:8px 10px;">Logout</button>
         <div id="authStatus" class="auth-user">Not logged in. Free mode may be limited.</div>
@@ -473,17 +473,15 @@
     const historyListEl = document.getElementById("historyList");
     const authEmailEl = document.getElementById("authEmail");
     const authPasswordEl = document.getElementById("authPassword");
-    const loginBtnEl = document.getElementById("loginBtn");
-    const registerBtnEl = document.getElementById("registerBtn");
+    const continueAuthBtnEl = document.getElementById("continueAuthBtn");
     const logoutBtnEl = document.getElementById("logoutBtn");
     const planActionsEl = document.getElementById("planActions");
     const upgradePro5BtnEl = document.getElementById("upgradePro5Btn");
     const upgradePro10BtnEl = document.getElementById("upgradePro10Btn");
+    const manageBillingBtnEl = document.getElementById("manageBillingBtn");
     const authStatusEl = document.getElementById("authStatus");
     const KEY = "trent_gpt_conversation_id";
-    const AUTH_KEY = "trent_gpt_auth_token";
     let conversationId = localStorage.getItem(KEY) || null;
-    let authToken = localStorage.getItem(AUTH_KEY) || null;
     let currentUser = null;
     const MAX_RENDERED_ITEMS = 220;
     const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || null;
@@ -538,24 +536,16 @@
 
     async function apiFetch(url, options = {}) {
       const opts = { ...options };
-      const headers = { ...(opts.headers || {}) };
-      if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
-      opts.headers = headers;
+      opts.headers = { ...(opts.headers || {}) };
       return fetch(url, opts);
     }
 
-    function setAuthState(user, token = null) {
+    function setAuthState(user) {
       currentUser = user || null;
-      if (token !== null) {
-        authToken = token;
-        if (authToken) localStorage.setItem(AUTH_KEY, authToken);
-        else localStorage.removeItem(AUTH_KEY);
-      }
       const loggedIn = !!currentUser;
       authEmailEl.style.display = loggedIn ? "none" : "";
       authPasswordEl.style.display = loggedIn ? "none" : "";
-      loginBtnEl.style.display = loggedIn ? "none" : "";
-      registerBtnEl.style.display = loggedIn ? "none" : "";
+      continueAuthBtnEl.style.display = loggedIn ? "none" : "";
       logoutBtnEl.style.display = loggedIn ? "" : "none";
       planActionsEl.style.display = loggedIn ? "" : "none";
       if (!loggedIn) {
@@ -564,10 +554,6 @@
     }
 
     async function refreshMe() {
-      if (!authToken) {
-        setAuthState(null, null);
-        return;
-      }
       try {
         const res = await apiFetch("/auth/me");
         if (!res.ok) throw new Error("auth");
@@ -578,7 +564,7 @@
         const imageCap = limits.images_per_hour == null ? "unlimited" : `${limits.images_per_hour}/hour`;
         authStatusEl.textContent = `${data.user.email} • ${data.user.plan} • prompts: ${inputCap} • images: ${imageCap} • used: ${data.usage_last_hour}`;
       } catch (_) {
-        setAuthState(null, null);
+        setAuthState(null);
       }
     }
 
@@ -733,12 +719,7 @@
             addImage(src, "AI generated image");
           }
         }
-        if (data.retrieved_sources?.length) {
-          addMeta("Notes: " + data.retrieved_sources.map(s => `${s.source} (${s.score})`).join(", "));
-        }
-        if (data.web_results?.length) {
-          addMeta("Web: " + data.web_results.map(r => r.title || r.url).join(" | "));
-        }
+        // Intentionally hide source/debug metadata in the UI.
         await refreshConversationList();
       } catch (err) {
         addBubble("Error: " + err.message, "bot", "error");
@@ -831,53 +812,46 @@
       promptEl.focus();
     });
 
-    loginBtnEl.addEventListener("click", async () => {
+    async function loginOrRegister() {
       const email = authEmailEl.value.trim();
       const password = authPasswordEl.value;
       if (!email || !password) return;
       try {
-        const res = await fetch("/auth/login", {
+        // Try login first for existing users.
+        let res = await fetch("/auth/login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email, password })
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || "Login failed");
-        setAuthState(data.user, data.token);
+        let data = await res.json();
+        // If user does not exist, create account automatically.
+        if (!res.ok && String(data.detail || "").toLowerCase().includes("invalid email or password")) {
+          res = await fetch("/auth/register", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email, password })
+          });
+          data = await res.json();
+        }
+        if (!res.ok) throw new Error(data.detail || "Authentication failed");
+        setAuthState(data.user);
         authPasswordEl.value = "";
         conversationId = null;
         localStorage.removeItem(KEY);
         chatEl.innerHTML = "";
-        addMeta("Logged in.");
+        addMeta("Signed in.");
         await refreshMe();
         await refreshConversationList();
       } catch (err) {
         addBubble("Error: " + err.message, "bot", "error");
       }
-    });
+    }
 
-    registerBtnEl.addEventListener("click", async () => {
-      const email = authEmailEl.value.trim();
-      const password = authPasswordEl.value;
-      if (!email || !password) return;
-      try {
-        const res = await fetch("/auth/register", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, password })
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || "Registration failed");
-        setAuthState(data.user, data.token);
-        authPasswordEl.value = "";
-        conversationId = null;
-        localStorage.removeItem(KEY);
-        chatEl.innerHTML = "";
-        addMeta("Account created and logged in.");
-        await refreshMe();
-        await refreshConversationList();
-      } catch (err) {
-        addBubble("Error: " + err.message, "bot", "error");
+    continueAuthBtnEl.addEventListener("click", loginOrRegister);
+    authPasswordEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        loginOrRegister();
       }
     });
 
@@ -885,7 +859,7 @@
       try {
         await apiFetch("/auth/logout", { method: "POST" });
       } catch (_) {}
-      setAuthState(null, null);
+      setAuthState(null);
       conversationId = null;
       localStorage.removeItem(KEY);
       chatEl.innerHTML = "";
@@ -894,7 +868,7 @@
     });
 
     async function startCheckout(plan) {
-      if (!authToken) {
+      if (!currentUser) {
         addBubble("Error: Please log in first.", "bot", "error");
         return;
       }
@@ -915,6 +889,22 @@
 
     upgradePro5BtnEl.addEventListener("click", () => startCheckout("pro5"));
     upgradePro10BtnEl.addEventListener("click", () => startCheckout("pro10"));
+
+    manageBillingBtnEl.addEventListener("click", async () => {
+      if (!currentUser) {
+        addBubble("Error: Please log in first.", "bot", "error");
+        return;
+      }
+      try {
+        const res = await apiFetch("/billing/portal", { method: "POST" });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Could not open billing portal");
+        if (!data.portal_url) throw new Error("No billing portal URL returned");
+        window.location.href = data.portal_url;
+      } catch (err) {
+        addBubble("Error: " + err.message, "bot", "error");
+      }
+    });
 
     initLocationHint();
     Promise.all([refreshMe(), loadConversation(), refreshConversationList()]).finally(() => {

@@ -21,6 +21,8 @@ Keep the app online 24/7 and keep live data (news/stocks) updated even when your
 - `LIVE_UPDATE_INTERVAL_SECONDS`: refresh interval (default `300`).
 - `STOCK_SYMBOLS`: comma-separated stock list, e.g. `AAPL,MSFT,SPY`.
 - `NEWS_FEED_URLS`: optional comma-separated RSS feeds.
+- `WEB_SEARCH_PROVIDER`: use `multi` for fallback search providers.
+- `BRAVE_SEARCH_API_KEY`: optional (improves live web coverage when set).
 - `DB_PATH`: shared database file path if both API and worker run on same machine.
 - `CREATOR_EMAIL`: your creator/admin email for unlimited access.
 - `STRIPE_SECRET_KEY`: Stripe secret API key (`sk_live_...` in production).

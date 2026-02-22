@@ -11,4 +11,4 @@ TOP_K = 4
 CHUNK_SIZE = 700
 MIN_SCORE = 0.15
 
-WEB_SEARCH_PROVIDER = os.getenv("WEB_SEARCH_PROVIDER", "duckduckgo").strip().lower()
+WEB_SEARCH_PROVIDER = os.getenv("WEB_SEARCH_PROVIDER", "multi").strip().lower()

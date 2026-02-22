@@ -11,7 +11,7 @@ from datetime import datetime
 from uuid import uuid4
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Request, Response, UploadFile, File, Form
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse
@@ -24,7 +24,13 @@ from .core.config import DEFAULT_MODEL, KNOWLEDGE_DIR, WEB_DIR, WEB_SEARCH_PROVI
 from .core.llm_wrapper import LLMWrapper
 from .core.live_data_store import LiveDataStore
 from .core.retriever import load_knowledge_chunks
-from .core.search_tool import DisabledWebSearchTool, DuckDuckGoSearchTool
+from .core.search_tool import (
+    BraveSearchTool,
+    CompositeWebSearchTool,
+    DisabledWebSearchTool,
+    DuckDuckGoSearchTool,
+    WikipediaSearchTool,
+)
 from .core.storage import ChatStorage
 from .jobs.updater import run_once
 
@@ -41,8 +47,12 @@ storage = ChatStorage()
 live_store = LiveDataStore()
 chunks = load_knowledge_chunks(KNOWLEDGE_DIR)
 llm = LLMWrapper(model=DEFAULT_MODEL)
-if WEB_SEARCH_PROVIDER == "duckduckgo":
-    search_tool = DuckDuckGoSearchTool()
+if WEB_SEARCH_PROVIDER in {"duckduckgo", "multi", "auto"}:
+    providers = [DuckDuckGoSearchTool(), WikipediaSearchTool()]
+    brave_key = (os.getenv("BRAVE_SEARCH_API_KEY") or "").strip()
+    if brave_key:
+        providers.insert(0, BraveSearchTool(brave_key))
+    search_tool = CompositeWebSearchTool(providers=providers)
 else:
     search_tool = DisabledWebSearchTool()
 chat_service = ChatService(llm=llm, chunks=chunks, web_search_tool=search_tool)
@@ -53,8 +63,17 @@ MAX_TEXT_UPLOAD_BYTES = 2 * 1024 * 1024
 MAX_FILENAME_LEN = 180
 CHAT_RATE_LIMIT_PER_MIN = int(os.getenv("CHAT_RATE_LIMIT_PER_MIN", "60"))
 UPLOAD_RATE_LIMIT_PER_MIN = int(os.getenv("UPLOAD_RATE_LIMIT_PER_MIN", "20"))
+AUTH_RATE_LIMIT_PER_MIN = int(os.getenv("AUTH_RATE_LIMIT_PER_MIN", "20"))
+AUTH_EMAIL_RATE_LIMIT_PER_15MIN = int(os.getenv("AUTH_EMAIL_RATE_LIMIT_PER_15MIN", "12"))
 FREE_INPUTS_PER_HOUR = int(os.getenv("FREE_INPUTS_PER_HOUR", "30"))
 FREE_IMAGES_PER_HOUR = int(os.getenv("FREE_IMAGES_PER_HOUR", "1"))
+SESSION_TTL_DAYS = int(os.getenv("SESSION_TTL_DAYS", "180"))
+SESSION_SLIDING_RENEWAL = os.getenv("SESSION_SLIDING_RENEWAL", "true").strip().lower() == "true"
+SESSION_ABSOLUTE_MAX_DAYS = int(os.getenv("SESSION_ABSOLUTE_MAX_DAYS", "365"))
+CREATOR_BOOTSTRAP_SECRET = (os.getenv("CREATOR_BOOTSTRAP_SECRET") or "").strip()
+SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "cortex_session").strip()
+_cookie_secure_env = os.getenv("COOKIE_SECURE")
+COOKIE_SECURE = False
 PLAN_CONFIG = {
     "free": {"price_usd_month": 0, "inputs_per_hour": 30, "images_per_hour": 1, "unlimited": False},
     "pro5": {"price_usd_month": 5, "inputs_per_hour": 100, "images_per_hour": 3, "unlimited": False},
@@ -64,6 +83,11 @@ PLAN_CONFIG = {
 STRIPE_SECRET_KEY = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
 STRIPE_WEBHOOK_SECRET = (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
 APP_BASE_URL = (os.getenv("APP_BASE_URL") or "http://127.0.0.1:8000").strip().rstrip("/")
+COOKIE_SECURE = (
+    _cookie_secure_env.strip().lower() == "true"
+    if _cookie_secure_env is not None
+    else APP_BASE_URL.startswith("https://")
+)
 STRIPE_PRICE_IDS = {
     "pro5": (os.getenv("STRIPE_PRICE_PRO5_ID") or "").strip(),
     "pro10": (os.getenv("STRIPE_PRICE_PRO10_ID") or "").strip(),
@@ -94,6 +118,8 @@ class SlidingWindowRateLimiter:
 
 chat_rate_limiter = SlidingWindowRateLimiter(CHAT_RATE_LIMIT_PER_MIN, window_seconds=60)
 upload_rate_limiter = SlidingWindowRateLimiter(UPLOAD_RATE_LIMIT_PER_MIN, window_seconds=60)
+auth_rate_limiter = SlidingWindowRateLimiter(AUTH_RATE_LIMIT_PER_MIN, window_seconds=60)
+auth_email_rate_limiter = SlidingWindowRateLimiter(AUTH_EMAIL_RATE_LIMIT_PER_15MIN, window_seconds=900)
 
 
 def _client_key(request: Request) -> str:
@@ -232,6 +258,7 @@ class UploadResponse(BaseModel):
 class AuthRequest(BaseModel):
     email: str = Field(min_length=5, max_length=160)
     password: str = Field(min_length=8, max_length=128)
+    creator_bootstrap_secret: str | None = None
 
 
 class AuthResponse(BaseModel):
@@ -259,6 +286,10 @@ class BillingCheckoutResponse(BaseModel):
     checkout_url: str
 
 
+class BillingPortalResponse(BaseModel):
+    portal_url: str
+
+
 def _build_uploaded_file_context(uploaded_files: list[dict]) -> str:
     if not uploaded_files:
         return ""
@@ -273,7 +304,8 @@ def _build_uploaded_file_context(uploaded_files: list[dict]) -> str:
 def _token_from_request(request: Request) -> str | None:
     auth = (request.headers.get("Authorization") or "").strip()
     if not auth.lower().startswith("bearer "):
-        return None
+        cookie_token = (request.cookies.get(SESSION_COOKIE_NAME) or "").strip()
+        return cookie_token or None
     token = auth[7:].strip()
     return token or None
 
@@ -282,7 +314,26 @@ def _current_user(request: Request) -> dict | None:
     token = _token_from_request(request)
     if not token:
         return None
-    return storage.get_user_by_token(token)
+    user = storage.get_user_by_token(token, max_age_days=SESSION_ABSOLUTE_MAX_DAYS)
+    if user and SESSION_SLIDING_RENEWAL:
+        storage.touch_session(token, ttl_days=SESSION_TTL_DAYS)
+    return user
+
+
+def _set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="lax",
+        max_age=SESSION_TTL_DAYS * 24 * 3600,
+        path="/",
+    )
+
+
+def _clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
 
 
 def _effective_plan(user: dict | None) -> str:
@@ -529,12 +580,27 @@ def terms_page() -> FileResponse:
 
 
 @app.post("/auth/register", response_model=AuthResponse)
-def register(body: AuthRequest) -> AuthResponse:
+def register(body: AuthRequest, request: Request, response: Response) -> AuthResponse:
+    if not auth_rate_limiter.allow(_client_key(request)):
+        raise HTTPException(status_code=429, detail="Too many auth attempts. Try again soon.")
+    email_key = (body.email or "").strip().lower()
+    if email_key and not auth_email_rate_limiter.allow(f"register:{email_key}"):
+        raise HTTPException(status_code=429, detail="Too many attempts for this account/email.")
     try:
         user = storage.create_user(email=body.email, password=body.password)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    token = storage.create_session(user_id=int(user["id"]))
+    creator_email = (os.getenv("CREATOR_EMAIL") or "").strip().lower()
+    if creator_email and str(user.get("email", "")).strip().lower() == creator_email:
+        if not CREATOR_BOOTSTRAP_SECRET:
+            raise HTTPException(status_code=503, detail="Creator bootstrap is not configured.")
+        submitted = (body.creator_bootstrap_secret or "").strip()
+        if submitted != CREATOR_BOOTSTRAP_SECRET:
+            raise HTTPException(status_code=403, detail="Creator bootstrap secret is required.")
+        storage.set_user_plan_by_id(int(user["id"]), "creator")
+        user["plan"] = "creator"
+    token = storage.create_session(user_id=int(user["id"]), ttl_days=SESSION_TTL_DAYS)
+    _set_session_cookie(response, token)
     return AuthResponse(
         token=token,
         user={
@@ -546,11 +612,17 @@ def register(body: AuthRequest) -> AuthResponse:
 
 
 @app.post("/auth/login", response_model=AuthResponse)
-def login(body: AuthRequest) -> AuthResponse:
+def login(body: AuthRequest, request: Request, response: Response) -> AuthResponse:
+    if not auth_rate_limiter.allow(_client_key(request)):
+        raise HTTPException(status_code=429, detail="Too many auth attempts. Try again soon.")
+    email_key = (body.email or "").strip().lower()
+    if email_key and not auth_email_rate_limiter.allow(f"login:{email_key}"):
+        raise HTTPException(status_code=429, detail="Too many attempts for this account/email.")
     user = storage.authenticate_user(email=body.email, password=body.password)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password.")
-    token = storage.create_session(user_id=int(user["id"]))
+    token = storage.create_session(user_id=int(user["id"]), ttl_days=SESSION_TTL_DAYS)
+    _set_session_cookie(response, token)
     return AuthResponse(
         token=token,
         user={
@@ -562,11 +634,22 @@ def login(body: AuthRequest) -> AuthResponse:
 
 
 @app.post("/auth/logout")
-def logout(request: Request) -> dict:
+def logout(request: Request, response: Response) -> dict:
     token = _token_from_request(request)
     if token:
         storage.delete_session(token)
+    _clear_session_cookie(response)
     return {"status": "ok"}
+
+
+@app.post("/auth/logout_all")
+def logout_all(request: Request, response: Response) -> dict:
+    user = _current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated.")
+    count = storage.delete_sessions_for_user(int(user["id"]))
+    _clear_session_cookie(response)
+    return {"status": "ok", "revoked_sessions": count}
 
 
 @app.get("/auth/me", response_model=MeResponse)
@@ -630,6 +713,35 @@ def billing_checkout(body: BillingCheckoutRequest, request: Request) -> BillingC
         raise HTTPException(status_code=503, detail="Could not create checkout session.") from exc
 
     return BillingCheckoutResponse(checkout_url=session.url)
+
+
+@app.post("/billing/portal", response_model=BillingPortalResponse)
+def billing_portal(request: Request) -> BillingPortalResponse:
+    _require_stripe_config()
+    user = _current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated.")
+
+    customer_id = (user.get("stripe_customer_id") or "").strip()
+    if not customer_id:
+        try:
+            customer = stripe.Customer.create(email=user["email"], metadata={"user_id": str(user["id"])})
+            customer_id = customer.id
+            storage.set_user_billing_ids(int(user["id"]), stripe_customer_id=customer_id)
+        except Exception as exc:
+            logger.exception("stripe_customer_create_failed_for_portal")
+            raise HTTPException(status_code=503, detail="Could not initialize billing customer.") from exc
+
+    try:
+        portal = stripe.billing_portal.Session.create(
+            customer=customer_id,
+            return_url=f"{APP_BASE_URL}/?billing=portal_return",
+        )
+    except Exception as exc:
+        logger.exception("stripe_billing_portal_create_failed")
+        raise HTTPException(status_code=503, detail="Could not create billing portal session.") from exc
+
+    return BillingPortalResponse(portal_url=portal.url)
 
 
 @app.post("/billing/webhook")
@@ -863,7 +975,7 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
         answer, hits, web_results, updated_profile = chat_service.ask(
             question=chat_request.message,
             history=history,
-            use_web_search=chat_request.use_web_search,
+            use_web_search=True,
             user_timezone=chat_request.user_timezone,
             user_utc_offset_minutes=chat_request.user_utc_offset_minutes,
             user_location_label=chat_request.user_location_label,

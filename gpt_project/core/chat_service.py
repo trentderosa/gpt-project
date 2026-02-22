@@ -26,6 +26,7 @@ If local notes and web results do not cover a question, use your general model k
 Never answer with only 'I don't know based on my notes'.
 For questions about latest/current/live information, do not give outdated cutoff-style answers (for example 'as of 2023').
 If live data is unavailable for a current-events question, clearly say live retrieval is unavailable right now.
+Always attempt live/web retrieval before answering.
 Use the user profile context to remember the user's name, facts they shared, and mirror their writing style."""
 
 TIME_QUERY_HINTS = {
@@ -180,14 +181,55 @@ class ChatService:
         if not query:
             return []
         queries = [query]
+        if self._needs_market_context(query):
+            queries.extend(
+                [
+                    "stock market today S&P 500 Dow Nasdaq",
+                    "SPY QQQ DIA market update today",
+                ]
+            )
         if self._is_current_events_query(query):
             queries.append(f"{query} {datetime.now().year}")
             queries.append(f"latest {query}")
-        return queries[:3]
+        deduped: list[str] = []
+        seen = set()
+        for q in queries:
+            norm = q.strip().lower()
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            deduped.append(q.strip())
+        return deduped[:5]
+
+    def _is_market_result(self, item: dict) -> bool:
+        text = " ".join(
+            [
+                str(item.get("title", "")),
+                str(item.get("snippet", "")),
+                str(item.get("url", "")),
+            ]
+        ).lower()
+        finance_tokens = {
+            "stock",
+            "market",
+            "s&p",
+            "nasdaq",
+            "dow",
+            "index",
+            "shares",
+            "equity",
+            "finance",
+            "invest",
+            "spy",
+            "qqq",
+            "dia",
+        }
+        return any(token in text for token in finance_tokens)
 
     def _search_live_web(self, question: str, max_results: int = 5) -> list[dict]:
         merged: list[dict] = []
         seen_urls: set[str] = set()
+        market_query = self._needs_market_context(question)
         for query in self._web_queries(question):
             try:
                 items = self.web_search_tool.search(query, max_results=max_results)
@@ -196,6 +238,8 @@ class ChatService:
             for item in items:
                 url = (item.get("url") or "").strip()
                 if not url or url in seen_urls:
+                    continue
+                if market_query and not self._is_market_result(item):
                     continue
                 seen_urls.add(url)
                 merged.append(item)
@@ -456,6 +500,9 @@ class ChatService:
     def _live_market_context(self, question: str) -> str:
         default_symbols = ["SPY", "QQQ", "DIA", "IWM", "AAPL", "MSFT", "NVDA", "TSLA"]
         symbols = self._extract_symbols_from_question(question) or default_symbols
+        lines: list[str] = []
+
+        # Source 1: Stooq quotes.
         try:
             symbol_param = ",".join(f"{symbol.lower()}.us" for symbol in symbols)
             url = f"https://stooq.com/q/l/?s={symbol_param}&f=sd2t2ohlcv&h&e=csv"
@@ -463,36 +510,80 @@ class ChatService:
             resp.raise_for_status()
             reader = csv.DictReader(StringIO(resp.text))
             rows = list(reader)
-            if not rows:
-                return "Live market context:\n- No market quote data returned.\n\n"
-
-            lines = ["Live market context (latest quotes):"]
-            for row in rows[:10]:
-                symbol = (row.get("Symbol") or "").upper()
-                close = row.get("Close") or "N/A"
-                date = row.get("Date") or "N/A"
-                time_val = row.get("Time") or "N/A"
-                volume = row.get("Volume") or "N/A"
-                lines.append(
-                    f"- {symbol}: close={close}, date={date}, time={time_val}, volume={volume}"
-                )
-            return "\n".join(lines) + "\n\n"
+            if rows:
+                lines = ["Live market context (latest quotes):"]
+                for row in rows[:10]:
+                    symbol = (row.get("Symbol") or "").upper()
+                    close = row.get("Close") or "N/A"
+                    date = row.get("Date") or "N/A"
+                    time_val = row.get("Time") or "N/A"
+                    volume = row.get("Volume") or "N/A"
+                    lines.append(
+                        f"- {symbol}: close={close}, date={date}, time={time_val}, volume={volume}"
+                    )
         except Exception:
-            rows = self.live_store.get_latest("stock", limit=10)
-            if not rows:
-                return "Live market context:\n- Market lookup failed for this request.\n\n"
-            lines = ["Live market context (cached snapshot):"]
-            for item in rows[:10]:
-                payload = item.get("payload", {})
-                symbol = str(payload.get("symbol", item.get("source_key", "unknown"))).upper()
-                close = payload.get("close", "N/A")
-                date = payload.get("date", item.get("created_at", "N/A"))
-                time_val = payload.get("time", "N/A")
-                volume = payload.get("volume", "N/A")
-                lines.append(
-                    f"- {symbol}: close={close}, date={date}, time={time_val}, volume={volume}"
-                )
+            pass
+
+        # Source 2: Yahoo chart meta fallback (no API key).
+        if len(lines) <= 1:
+            index_map = {
+                "SPY": "SPY",
+                "QQQ": "QQQ",
+                "DIA": "DIA",
+                "IWM": "IWM",
+                "GSPC": "%5EGSPC",
+                "DJI": "%5EDJI",
+                "IXIC": "%5EIXIC",
+            }
+            yahoo_lines: list[str] = []
+            for symbol in symbols[:6]:
+                key = symbol.upper().lstrip("^")
+                ticker = index_map.get(key, symbol.upper())
+                try:
+                    resp = requests.get(
+                        f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}",
+                        params={"range": "1d", "interval": "5m"},
+                        timeout=8,
+                    )
+                    resp.raise_for_status()
+                    payload = resp.json()
+                    result = ((payload.get("chart") or {}).get("result") or [])
+                    if not result:
+                        continue
+                    meta = result[0].get("meta") or {}
+                    price = meta.get("regularMarketPrice")
+                    prev = meta.get("previousClose")
+                    shown_symbol = str(meta.get("symbol") or symbol).upper()
+                    if price is None:
+                        continue
+                    change_txt = ""
+                    if isinstance(prev, (int, float)) and prev:
+                        change_pct = ((float(price) - float(prev)) / float(prev)) * 100.0
+                        change_txt = f", change={change_pct:+.2f}%"
+                    yahoo_lines.append(f"- {shown_symbol}: price={price}{change_txt}")
+                except Exception:
+                    continue
+            if yahoo_lines:
+                lines = ["Live market context (latest quotes):"] + yahoo_lines
+
+        if lines:
             return "\n".join(lines) + "\n\n"
+
+        rows = self.live_store.get_latest("stock", limit=10)
+        if not rows:
+            return "Live market context:\n- Market lookup failed for this request.\n\n"
+        lines = ["Live market context (cached snapshot):"]
+        for item in rows[:10]:
+            payload = item.get("payload", {})
+            symbol = str(payload.get("symbol", item.get("source_key", "unknown"))).upper()
+            close = payload.get("close", "N/A")
+            date = payload.get("date", item.get("created_at", "N/A"))
+            time_val = payload.get("time", "N/A")
+            volume = payload.get("volume", "N/A")
+            lines.append(
+                f"- {symbol}: close={close}, date={date}, time={time_val}, volume={volume}"
+            )
+        return "\n".join(lines) + "\n\n"
 
     def _live_news_context(self) -> str:
         rows = self.live_store.get_latest("news", limit=5)

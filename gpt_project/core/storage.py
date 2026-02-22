@@ -345,8 +345,7 @@ class ChatStorage:
         normalized = email.strip().lower()
         if len(password) < 8:
             raise ValueError("Password must be at least 8 characters.")
-        creator_email = (os.getenv("CREATOR_EMAIL") or "").strip().lower()
-        plan = "creator" if creator_email and normalized == creator_email else "free"
+        plan = "free"
         with self._connect() as conn:
             exists = conn.execute(
                 "SELECT id FROM users WHERE email = ?",
@@ -386,7 +385,7 @@ class ChatStorage:
             "created_at": row["created_at"],
         }
 
-    def create_session(self, user_id: int, ttl_days: int = 30) -> str:
+    def create_session(self, user_id: int, ttl_days: int = 180) -> str:
         token = secrets.token_urlsafe(48)
         expires_at = datetime.now(timezone.utc) + timedelta(days=max(ttl_days, 1))
         with self._connect() as conn:
@@ -396,18 +395,24 @@ class ChatStorage:
             )
         return token
 
-    def get_user_by_token(self, token: str) -> dict | None:
+    def get_user_by_token(self, token: str, max_age_days: int | None = None) -> dict | None:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        age_clause = ""
+        params: list[object] = [token, now]
+        if max_age_days is not None:
+            age_clause = " AND s.created_at >= datetime('now', ?)"
+            params.append(f"-{max(max_age_days, 1)} days")
         with self._connect() as conn:
             row = conn.execute(
-                """
+                f"""
                 SELECT u.id, u.email, u.plan, u.created_at, s.expires_at
-                       ,u.stripe_customer_id, u.stripe_subscription_id
+                       ,u.stripe_customer_id, u.stripe_subscription_id, s.created_at AS session_created_at
                 FROM user_sessions s
                 JOIN users u ON u.id = s.user_id
                 WHERE s.token = ? AND s.expires_at > ?
+                {age_clause}
                 """,
-                (token, now),
+                tuple(params),
             ).fetchone()
         if not row:
             return None
@@ -438,6 +443,24 @@ class ChatStorage:
     def delete_session(self, token: str) -> None:
         with self._connect() as conn:
             conn.execute("DELETE FROM user_sessions WHERE token = ?", (token,))
+
+    def delete_sessions_for_user(self, user_id: int) -> int:
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
+            return int(cur.rowcount or 0)
+
+    def touch_session(self, token: str, ttl_days: int = 180) -> bool:
+        new_expiry = datetime.now(timezone.utc) + timedelta(days=max(ttl_days, 1))
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE user_sessions
+                SET expires_at = ?
+                WHERE token = ? AND expires_at > datetime('now')
+                """,
+                (new_expiry.strftime("%Y-%m-%d %H:%M:%S"), token),
+            )
+            return cur.rowcount > 0
 
     def record_usage_event(self, user_id: int, event_type: str = "chat_input") -> None:
         with self._connect() as conn:

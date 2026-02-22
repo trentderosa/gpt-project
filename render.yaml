@@ -20,9 +20,11 @@ services:
       - key: STOCK_SYMBOLS
         value: "AAPL,MSFT,SPY,TSLA,NVDA"
       - key: WEB_SEARCH_PROVIDER
-        value: duckduckgo
+        value: multi
+      - key: BRAVE_SEARCH_API_KEY
+        sync: false
       - key: APP_BASE_URL
-        value: https://trent-gpt-web.onrender.com
+        value: https://cortex-engine.com
       - key: CREATOR_EMAIL
         sync: false
       - key: STRIPE_SECRET_KEY
