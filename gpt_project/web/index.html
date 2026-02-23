@@ -608,6 +608,32 @@
       chatEl.scrollTop = chatEl.scrollHeight;
     }
 
+    async function typeBubble(text, role = "bot", extraClass = "") {
+      const div = document.createElement("div");
+      div.className = `bubble ${role} ${extraClass}`.trim();
+      const content = document.createElement("div");
+      content.className = "bubble-content";
+      div.appendChild(content);
+      chatEl.appendChild(div);
+      pruneChatIfNeeded();
+      chatEl.scrollTop = chatEl.scrollHeight;
+
+      const tokens = String(text || "").match(/\S+\s*/g) || [];
+      let rendered = "";
+      const perTokenDelayMs = role === "bot" ? 22 : 0;
+      for (const token of tokens) {
+        rendered += token;
+        content.innerHTML = formatMessageText(rendered);
+        chatEl.scrollTop = chatEl.scrollHeight;
+        if (perTokenDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, perTokenDelayMs));
+        }
+      }
+      if (!tokens.length) {
+        content.innerHTML = formatMessageText(text);
+      }
+    }
+
     function escapeHtml(input) {
       return String(input)
         .replaceAll("&", "&amp;")
@@ -761,7 +787,7 @@
         if (!res.ok) throw new Error(data.detail || "Request failed");
         conversationId = data.conversation_id;
         localStorage.setItem(KEY, conversationId);
-        addBubble(data.answer, "bot");
+        await typeBubble(data.answer, "bot");
         if (data.generated_images?.length) {
           for (const src of data.generated_images) {
             addImage(src, "AI generated image");
