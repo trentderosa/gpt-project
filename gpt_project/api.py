@@ -61,6 +61,21 @@ MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_IMAGE_UPLOAD_BYTES = 8 * 1024 * 1024
 MAX_TEXT_UPLOAD_BYTES = 2 * 1024 * 1024
 MAX_FILENAME_LEN = 180
+MAX_MESSAGE_CHARS = 6000
+BLOCKED_UPLOAD_EXTENSIONS = {
+    ".exe",
+    ".dll",
+    ".bat",
+    ".cmd",
+    ".ps1",
+    ".sh",
+    ".msi",
+    ".com",
+    ".scr",
+    ".jar",
+    ".vbs",
+}
+CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
 CHAT_RATE_LIMIT_PER_MIN = int(os.getenv("CHAT_RATE_LIMIT_PER_MIN", "60"))
 UPLOAD_RATE_LIMIT_PER_MIN = int(os.getenv("UPLOAD_RATE_LIMIT_PER_MIN", "20"))
 AUTH_RATE_LIMIT_PER_MIN = int(os.getenv("AUTH_RATE_LIMIT_PER_MIN", "20"))
@@ -137,6 +152,32 @@ def _safe_filename(name: str | None) -> str:
     base = (name or "uploaded_file").strip() or "uploaded_file"
     base = re.sub(r"[^\w.\- ]+", "_", base)
     return base[:MAX_FILENAME_LEN] or "uploaded_file"
+
+
+def _is_blocked_upload(filename: str | None, content_type: str | None) -> bool:
+    safe_name = _safe_filename(filename).lower()
+    _, ext = os.path.splitext(safe_name)
+    if ext in BLOCKED_UPLOAD_EXTENSIONS:
+        return True
+    ctype = (content_type or "").strip().lower()
+    if ctype in {
+        "application/x-msdownload",
+        "application/x-msdos-program",
+        "application/x-dosexec",
+        "application/x-sh",
+        "application/x-bat",
+        "application/x-powershell",
+    }:
+        return True
+    return False
+
+
+def _sanitize_chat_message(raw: str) -> str:
+    text = (raw or "").strip()
+    text = CONTROL_CHAR_PATTERN.sub("", text)
+    if not text:
+        return ""
+    return text[:MAX_MESSAGE_CHARS]
 
 
 def _sanitize_extracted_text(text: str) -> str:
@@ -220,7 +261,7 @@ class CreateConversationResponse(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    message: str = Field(min_length=1, max_length=6000)
+    message: str = Field(min_length=1, max_length=MAX_MESSAGE_CHARS)
     conversation_id: str | None = None
     use_web_search: bool = True
     user_timezone: str | None = None
@@ -834,6 +875,8 @@ async def upload_file(
     user = _current_user(request)
     if not upload_rate_limiter.allow(_client_key(request)):
         raise HTTPException(status_code=429, detail="Too many uploads. Please slow down and try again.")
+    if _is_blocked_upload(file.filename, file.content_type):
+        raise HTTPException(status_code=400, detail="This file type is not allowed for upload.")
 
     if conversation_id is None:
         conversation_id = storage.create_conversation(user_id=int(user["id"]) if user else None)
@@ -906,7 +949,8 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
     if not chat_rate_limiter.allow(client_key):
         raise HTTPException(status_code=429, detail="Too many chat requests. Please wait a moment.")
 
-    if not chat_request.message.strip():
+    sanitized_message = _sanitize_chat_message(chat_request.message)
+    if not sanitized_message:
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
 
     conversation_id = chat_request.conversation_id
@@ -939,7 +983,7 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
     merged_profile = _merge_profiles(conversation_profile, user_profile)
     uploaded_files = storage.get_uploaded_files(conversation_id, limit=12)
     uploaded_file_context = _build_uploaded_file_context(uploaded_files)
-    raw_message = chat_request.message.strip()
+    raw_message = sanitized_message
     image_prompt = _extract_image_prompt(raw_message)
 
     if image_prompt is not None:
@@ -976,7 +1020,7 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
         answer = f"Generated image for: {prompt}"
         if user:
             storage.record_usage_event(int(user["id"]), event_type="image_generation")
-        storage.add_message(conversation_id, "user", chat_request.message)
+        storage.add_message(conversation_id, "user", sanitized_message)
         storage.add_message(conversation_id, "assistant", answer)
         return ChatResponse(
             conversation_id=conversation_id,
@@ -988,7 +1032,7 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
 
     try:
         answer, hits, web_results, updated_profile = chat_service.ask(
-            question=chat_request.message,
+            question=sanitized_message,
             history=history,
             use_web_search=True,
             user_timezone=chat_request.user_timezone,
@@ -1009,7 +1053,7 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
         logger.exception("chat_unexpected_failure error=%s", str(exc))
         raise HTTPException(status_code=503, detail="Temporary server issue. Please try again.") from exc
 
-    storage.add_message(conversation_id, "user", chat_request.message)
+    storage.add_message(conversation_id, "user", sanitized_message)
     storage.add_message(conversation_id, "assistant", answer)
     storage.upsert_user_profile(conversation_id, updated_profile)
     if user:
