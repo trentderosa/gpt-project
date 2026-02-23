@@ -573,3 +573,27 @@ class ChatStorage:
                 (subscription, customer),
             )
             return cur.rowcount > 0
+
+    def admin_stats(self) -> dict:
+        with self._connect() as conn:
+            users_total = conn.execute("SELECT COUNT(1) AS cnt FROM users").fetchone()["cnt"]
+            conversations_total = conn.execute("SELECT COUNT(1) AS cnt FROM conversations").fetchone()["cnt"]
+            messages_total = conn.execute("SELECT COUNT(1) AS cnt FROM messages").fetchone()["cnt"]
+            active_last_24h = conn.execute(
+                """
+                SELECT COUNT(DISTINCT user_id) AS cnt
+                FROM usage_events
+                WHERE created_at >= datetime('now', '-24 hour')
+                """
+            ).fetchone()["cnt"]
+            plan_rows = conn.execute(
+                "SELECT plan, COUNT(1) AS cnt FROM users GROUP BY plan ORDER BY plan ASC"
+            ).fetchall()
+            plans = {row["plan"]: int(row["cnt"]) for row in plan_rows}
+        return {
+            "users_total": int(users_total or 0),
+            "conversations_total": int(conversations_total or 0),
+            "messages_total": int(messages_total or 0),
+            "active_users_last_24h": int(active_last_24h or 0),
+            "plans": plans,
+        }

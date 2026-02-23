@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import re
 import xml.etree.ElementTree as ET
+import time
 from zoneinfo import ZoneInfo
 import requests
 import csv
@@ -179,6 +180,20 @@ class ChatService:
         self.history: list[dict] = []
         self.web_search_tool = web_search_tool or DisabledWebSearchTool()
         self.live_store = LiveDataStore()
+
+    def _http_get(self, url: str, params: dict | None = None, timeout: int = 8, attempts: int = 3):
+        last_exc = None
+        for attempt in range(max(attempts, 1)):
+            try:
+                response = requests.get(url, params=params, timeout=timeout)
+                response.raise_for_status()
+                return response
+            except Exception as exc:
+                last_exc = exc
+                if attempt < attempts - 1:
+                    time.sleep(0.25 * (attempt + 1))
+                    continue
+                raise last_exc
 
     def _needs_runtime_time_context(self, question: str) -> bool:
         q = question.lower()
@@ -507,12 +522,12 @@ class ChatService:
         if not location_text:
             return None
         try:
-            resp = requests.get(
+            resp = self._http_get(
                 "https://geocoding-api.open-meteo.com/v1/search",
                 params={"name": location_text, "count": 1, "language": "en", "format": "json"},
                 timeout=8,
+                attempts=3,
             )
-            resp.raise_for_status()
             payload = resp.json()
             results = payload.get("results") or []
             if not results:
@@ -565,7 +580,7 @@ class ChatService:
         temp_label = "F" if use_us_units else "C"
         wind_label = "mph" if use_us_units else "km/h"
         try:
-            resp = requests.get(
+            resp = self._http_get(
                 "https://api.open-meteo.com/v1/forecast",
                 params={
                     "latitude": lat,
@@ -576,8 +591,8 @@ class ChatService:
                     "wind_speed_unit": wind_unit,
                 },
                 timeout=8,
+                attempts=3,
             )
-            resp.raise_for_status()
             payload = resp.json()
             cur = payload.get("current", {})
             return (
@@ -646,12 +661,12 @@ class ChatService:
             key = symbol.upper().lstrip("^")
             ticker = index_map.get(key, symbol.upper())
             try:
-                resp = requests.get(
+                resp = self._http_get(
                     f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}",
                     params={"range": "1d", "interval": "5m"},
                     timeout=8,
+                    attempts=2,
                 )
-                resp.raise_for_status()
                 payload = resp.json()
                 result = ((payload.get("chart") or {}).get("result") or [])
                 if not result:
@@ -681,11 +696,11 @@ class ChatService:
                     continue
                 stooq_ticker = f"{key.lower()}.us"
                 try:
-                    resp = requests.get(
+                    resp = self._http_get(
                         f"https://stooq.com/q/l/?s={stooq_ticker}&f=sd2t2ohlcv&h&e=csv",
                         timeout=8,
+                        attempts=2,
                     )
-                    resp.raise_for_status()
                     reader = csv.DictReader(StringIO(resp.text))
                     rows = list(reader)
                     if not rows:
@@ -776,12 +791,12 @@ class ChatService:
         if not q:
             return ""
         try:
-            resp = requests.get(
+            resp = self._http_get(
                 "https://news.google.com/rss/search",
                 params={"q": q, "hl": "en-US", "gl": "US", "ceid": "US:en"},
                 timeout=8,
+                attempts=2,
             )
-            resp.raise_for_status()
             root = ET.fromstring(resp.content)
             items = root.findall(".//item")
             if not items:

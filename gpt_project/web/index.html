@@ -325,6 +325,24 @@
       gap: 8px;
       min-height: 0;
     }
+    .starter-prompts {
+      grid-column: 1 / -1;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding-top: 2px;
+    }
+    .starter-chip {
+      border: 1px solid #b8d7ff;
+      background: #eef6ff;
+      color: #234f7b;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      font-family: "Space Grotesk", sans-serif;
+    }
     .attachment-chip {
       display: inline-flex;
       align-items: center;
@@ -515,6 +533,12 @@
         <input id="prompt" autocomplete="off" placeholder="Ask anything..." />
         <button id="send" class="send" type="submit">Send</button>
         <div id="attachmentTray" class="attachment-tray" aria-live="polite"></div>
+        <div id="starterPrompts" class="starter-prompts">
+          <button class="starter-chip" type="button" data-prompt="What is the weather in Harrisonburg, VA right now?">Weather</button>
+          <button class="starter-chip" type="button" data-prompt="What is SPY and QQQ doing today?">Markets</button>
+          <button class="starter-chip" type="button" data-prompt="Summarize the latest AI news headlines.">AI News</button>
+          <button class="starter-chip" type="button" data-prompt="Help me improve my resume for software internships.">Resume Help</button>
+        </div>
       </form>
     </main>
   </div>
@@ -540,6 +564,7 @@
     const authStatusEl = document.getElementById("authStatus");
     const appEl = document.querySelector(".app");
     const toggleSidebarBtnEl = document.getElementById("toggleSidebarBtn");
+    const starterPromptsEl = document.getElementById("starterPrompts");
     const KEY = "trent_gpt_conversation_id";
     const SIDEBAR_KEY = "cortex_sidebar_hidden";
     let conversationId = localStorage.getItem(KEY) || null;
@@ -753,6 +778,19 @@
       chatEl.scrollTop = chatEl.scrollHeight;
     }
 
+    function createBotBubble(initialText = "") {
+      const div = document.createElement("div");
+      div.className = "bubble bot";
+      const content = document.createElement("div");
+      content.className = "bubble-content";
+      content.innerHTML = formatMessageText(initialText);
+      div.appendChild(content);
+      chatEl.appendChild(div);
+      pruneChatIfNeeded();
+      chatEl.scrollTop = chatEl.scrollHeight;
+      return { div, content };
+    }
+
     function showThinking() {
       hideThinking();
       const div = document.createElement("div");
@@ -790,6 +828,8 @@
     async function sendMessage(message) {
       sendEl.disabled = true;
       attachBtnEl.disabled = true;
+      const chips = starterPromptsEl?.querySelectorAll(".starter-chip") || [];
+      chips.forEach(chip => chip.disabled = true);
       showThinking();
       try {
         // Upload selected files first so they can be used in this turn.
@@ -811,7 +851,7 @@
           renderAttachmentTray();
         }
 
-        const res = await apiFetch("/chat", {
+        const res = await apiFetch("/chat/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -823,24 +863,70 @@
             user_location_label: userLocationLabel
           })
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || "Request failed");
-        conversationId = data.conversation_id;
-        localStorage.setItem(KEY, conversationId);
-        await typeBubble(data.answer, "bot");
-        if (data.generated_images?.length) {
-          for (const src of data.generated_images) {
+        if (!res.ok) {
+          const data = await res.json();
+          throw new Error(data.detail || "Request failed");
+        }
+
+        hideThinking();
+        const reader = res.body?.getReader();
+        if (!reader) throw new Error("Streaming not supported by browser.");
+        const decoder = new TextDecoder("utf-8");
+        let buffer = "";
+        let builtAnswer = "";
+        let finalPayload = null;
+        const bubble = createBotBubble("");
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const events = buffer.split("\n\n");
+          buffer = events.pop() || "";
+          for (const evt of events) {
+            const lines = evt.split("\n");
+            let eventName = "message";
+            let dataStr = "";
+            for (const line of lines) {
+              if (line.startsWith("event:")) eventName = line.slice(6).trim();
+              if (line.startsWith("data:")) dataStr += line.slice(5).trim();
+            }
+            if (!dataStr) continue;
+            let parsed = null;
+            try { parsed = JSON.parse(dataStr); } catch (_) { continue; }
+            if (eventName === "meta" && parsed?.conversation_id) {
+              conversationId = parsed.conversation_id;
+              localStorage.setItem(KEY, conversationId);
+            } else if (eventName === "token" && parsed?.token) {
+              builtAnswer += parsed.token;
+              bubble.content.innerHTML = formatMessageText(builtAnswer);
+              chatEl.scrollTop = chatEl.scrollHeight;
+            } else if (eventName === "done") {
+              finalPayload = parsed;
+            }
+          }
+        }
+
+        if (finalPayload?.conversation_id) {
+          conversationId = finalPayload.conversation_id;
+          localStorage.setItem(KEY, conversationId);
+        }
+        const finalAnswer = finalPayload?.answer || builtAnswer || "No response generated.";
+        bubble.content.innerHTML = formatMessageText(finalAnswer);
+        if (finalPayload?.generated_images?.length) {
+          for (const src of finalPayload.generated_images) {
             addImage(src, "AI generated image");
           }
         }
-        // Intentionally hide source/debug metadata in the UI.
         await refreshConversationList();
       } catch (err) {
+        hideThinking();
         addBubble("Error: " + err.message, "bot", "error");
       } finally {
         hideThinking();
         sendEl.disabled = false;
         attachBtnEl.disabled = false;
+        chips.forEach(chip => chip.disabled = false);
         promptEl.focus();
       }
     }
@@ -925,6 +1011,16 @@
       addMeta("New conversation started.");
       refreshConversationList();
       promptEl.focus();
+    });
+
+    starterPromptsEl?.addEventListener("click", async (e) => {
+      const btn = e.target.closest(".starter-chip");
+      if (!btn) return;
+      const message = btn.getAttribute("data-prompt") || "";
+      if (!message) return;
+      promptEl.value = "";
+      addBubble(message, "user");
+      await sendMessage(message);
     });
 
     toggleSidebarBtnEl.addEventListener("click", () => {

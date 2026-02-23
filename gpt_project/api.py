@@ -5,6 +5,7 @@ import time
 import threading
 import base64
 import mimetypes
+import json
 from collections import defaultdict, deque
 from io import BytesIO
 from datetime import datetime
@@ -12,9 +13,11 @@ from uuid import uuid4
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, HTTPException, Request, Response, UploadFile, File, Form
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 from openai import APIConnectionError, AuthenticationError, BadRequestError, RateLimitError
 from pydantic import BaseModel, Field
 import stripe
@@ -42,6 +45,17 @@ if not logger.handlers:
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
+
+allowed_origins_raw = (os.getenv("ALLOWED_ORIGINS") or "").strip()
+allowed_origins = [o.strip() for o in allowed_origins_raw.split(",") if o.strip()]
+if allowed_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
 
 storage = ChatStorage()
 live_store = LiveDataStore()
@@ -333,6 +347,10 @@ class BillingPortalResponse(BaseModel):
     portal_url: str
 
 
+class MemoryForgetRequest(BaseModel):
+    keys: list[str] = Field(default_factory=list)
+
+
 def _build_uploaded_file_context(uploaded_files: list[dict]) -> str:
     if not uploaded_files:
         return ""
@@ -529,6 +547,11 @@ async def request_context_middleware(request: Request, call_next):
 
     duration_ms = int((time.perf_counter() - start) * 1000)
     response.headers["X-Request-ID"] = request_id
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "geolocation=(self), microphone=(), camera=()"
+    response.headers["Cache-Control"] = "no-store"
     logger.info(
         "request_complete request_id=%s method=%s path=%s status=%s duration_ms=%s",
         request_id,
@@ -629,17 +652,19 @@ def register(body: AuthRequest, request: Request, response: Response) -> AuthRes
     email_key = (body.email or "").strip().lower()
     if email_key and not auth_email_rate_limiter.allow(f"register:{email_key}"):
         raise HTTPException(status_code=429, detail="Too many attempts for this account/email.")
-    try:
-        user = storage.create_user(email=body.email, password=body.password)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     creator_email = (os.getenv("CREATOR_EMAIL") or "").strip().lower()
-    if creator_email and str(user.get("email", "")).strip().lower() == creator_email:
+    incoming_email = (body.email or "").strip().lower()
+    if creator_email and incoming_email == creator_email:
         if not CREATOR_BOOTSTRAP_SECRET:
             raise HTTPException(status_code=503, detail="Creator bootstrap is not configured.")
         submitted = (body.creator_bootstrap_secret or "").strip()
         if submitted != CREATOR_BOOTSTRAP_SECRET:
             raise HTTPException(status_code=403, detail="Creator bootstrap secret is required.")
+    try:
+        user = storage.create_user(email=body.email, password=body.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if creator_email and str(user.get("email", "")).strip().lower() == creator_email:
         storage.set_user_plan_by_id(int(user["id"]), "creator")
         user["plan"] = "creator"
     token = storage.create_session(user_id=int(user["id"]), ttl_days=SESSION_TTL_DAYS)
@@ -718,6 +743,30 @@ def me(request: Request) -> MeResponse:
 @app.get("/plans")
 def plans() -> dict:
     return {"plans": PLAN_CONFIG}
+
+
+@app.get("/memory")
+def get_memory(request: Request) -> dict:
+    user = _current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated.")
+    memory = storage.get_user_memory(int(user["id"]))
+    return {"memory": memory}
+
+
+@app.post("/memory/forget")
+def forget_memory(body: MemoryForgetRequest, request: Request) -> dict:
+    user = _current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated.")
+    memory = storage.get_user_memory(int(user["id"]))
+    if not body.keys:
+        memory = {}
+    else:
+        for key in body.keys:
+            memory.pop((key or "").strip(), None)
+    storage.upsert_user_memory(int(user["id"]), memory)
+    return {"status": "ok", "memory": memory}
 
 
 @app.post("/billing/checkout", response_model=BillingCheckoutResponse)
@@ -857,6 +906,14 @@ def admin_set_user_plan(body: PlanUpdateRequest, request: Request) -> dict:
     if not updated:
         raise HTTPException(status_code=404, detail="User email not found.")
     return {"status": "ok", "email": body.email.strip().lower(), "plan": plan}
+
+
+@app.get("/admin/stats")
+def admin_stats(request: Request) -> dict:
+    user = _current_user(request)
+    if not user or _effective_plan(user) != "creator":
+        raise HTTPException(status_code=403, detail="Creator access required.")
+    return {"stats": storage.admin_stats()}
 
 
 @app.post("/conversations", response_model=CreateConversationResponse)
@@ -1034,7 +1091,7 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
         answer, hits, web_results, updated_profile = chat_service.ask(
             question=sanitized_message,
             history=history,
-            use_web_search=True,
+            use_web_search=chat_request.use_web_search,
             user_timezone=chat_request.user_timezone,
             user_utc_offset_minutes=chat_request.user_utc_offset_minutes,
             user_location_label=chat_request.user_location_label,
@@ -1070,3 +1127,28 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
         web_results=web_results,
         generated_images=[],
     )
+
+
+def _stream_text_tokens(text: str):
+    for token in re.findall(r"\S+\s*", text or ""):
+        yield token
+
+
+@app.post("/chat/stream")
+def chat_stream(chat_request: ChatRequest, request: Request):
+    result = chat(chat_request, request)
+
+    def event_gen():
+        yield f"event: meta\ndata: {json.dumps({'conversation_id': result.conversation_id})}\n\n"
+        for token in _stream_text_tokens(result.answer):
+            yield f"event: token\ndata: {json.dumps({'token': token})}\n\n"
+        payload = {
+            "conversation_id": result.conversation_id,
+            "answer": result.answer,
+            "retrieved_sources": result.retrieved_sources,
+            "web_results": result.web_results,
+            "generated_images": result.generated_images,
+        }
+        yield f"event: done\ndata: {json.dumps(payload)}\n\n"
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
