@@ -120,6 +120,8 @@ chat_rate_limiter = SlidingWindowRateLimiter(CHAT_RATE_LIMIT_PER_MIN, window_sec
 upload_rate_limiter = SlidingWindowRateLimiter(UPLOAD_RATE_LIMIT_PER_MIN, window_seconds=60)
 auth_rate_limiter = SlidingWindowRateLimiter(AUTH_RATE_LIMIT_PER_MIN, window_seconds=60)
 auth_email_rate_limiter = SlidingWindowRateLimiter(AUTH_EMAIL_RATE_LIMIT_PER_15MIN, window_seconds=900)
+anon_input_hour_limiter = SlidingWindowRateLimiter(FREE_INPUTS_PER_HOUR, window_seconds=3600)
+anon_image_hour_limiter = SlidingWindowRateLimiter(FREE_IMAGES_PER_HOUR, window_seconds=3600)
 
 
 def _client_key(request: Request) -> str:
@@ -900,7 +902,8 @@ def get_live_news(limit: int = 20) -> LiveDataResponse:
 @app.post("/chat", response_model=ChatResponse)
 def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
     user = _current_user(request)
-    if not chat_rate_limiter.allow(_client_key(request)):
+    client_key = _client_key(request)
+    if not chat_rate_limiter.allow(client_key):
         raise HTTPException(status_code=429, detail="Too many chat requests. Please wait a moment.")
 
     if not chat_request.message.strip():
@@ -923,6 +926,12 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
                 detail=f"{plan} plan limit reached ({input_limit} prompts/hour). Upgrade to continue.",
             )
         storage.record_usage_event(int(user["id"]), event_type="chat_input")
+    else:
+        if not anon_input_hour_limiter.allow(f"inputs:{client_key}"):
+            raise HTTPException(
+                status_code=402,
+                detail=f"free plan limit reached ({FREE_INPUTS_PER_HOUR} prompts/hour). Sign in or upgrade to continue.",
+            )
 
     history = storage.get_messages(conversation_id)
     conversation_profile = storage.get_user_profile(conversation_id)
@@ -946,6 +955,12 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
                 raise HTTPException(
                     status_code=402,
                     detail=f"{plan} plan image limit reached ({image_limit}/hour). Upgrade to continue.",
+                )
+        else:
+            if not anon_image_hour_limiter.allow(f"images:{client_key}"):
+                raise HTTPException(
+                    status_code=402,
+                    detail=f"free plan image limit reached ({FREE_IMAGES_PER_HOUR}/hour). Sign in or upgrade to continue.",
                 )
         try:
             image_data_url = llm.generate_image(prompt=prompt)
