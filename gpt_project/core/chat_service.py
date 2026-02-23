@@ -487,6 +487,45 @@ class ChatService:
             return None
         return float(match.group(1)), float(match.group(2))
 
+    def _extract_weather_location_from_question(self, question: str) -> str | None:
+        q = (question or "").strip()
+        if not q:
+            return None
+        patterns = [
+            re.compile(r"\b(?:weather|temp(?:erature)?)\s+(?:in|for|at)\s+([A-Za-z0-9.,\-\s]{2,80})\??$", re.IGNORECASE),
+            re.compile(r"\bin\s+([A-Za-z0-9.,\-\s]{2,80})\s*$", re.IGNORECASE),
+        ]
+        for pattern in patterns:
+            match = pattern.search(q)
+            if match:
+                location = match.group(1).strip(" .,!?:;")
+                if len(location) >= 2:
+                    return location
+        return None
+
+    def _geocode_location(self, location_text: str) -> tuple[float, float] | None:
+        if not location_text:
+            return None
+        try:
+            resp = requests.get(
+                "https://geocoding-api.open-meteo.com/v1/search",
+                params={"name": location_text, "count": 1, "language": "en", "format": "json"},
+                timeout=8,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            results = payload.get("results") or []
+            if not results:
+                return None
+            top = results[0]
+            lat = top.get("latitude")
+            lon = top.get("longitude")
+            if lat is None or lon is None:
+                return None
+            return float(lat), float(lon)
+        except Exception:
+            return None
+
     def _use_us_units(self, user_location_label: str | None, user_timezone: str | None) -> bool:
         lat_lon = self._parse_lat_lon(user_location_label)
         if lat_lon:
@@ -504,12 +543,17 @@ class ChatService:
         self,
         user_location_label: str | None,
         user_timezone: str | None = None,
+        question: str | None = None,
     ) -> str:
         lat_lon = self._parse_lat_lon(user_location_label)
         if not lat_lon:
+            query_location = self._extract_weather_location_from_question(question or "")
+            if query_location:
+                lat_lon = self._geocode_location(query_location)
+        if not lat_lon:
             return (
                 "Live weather context:\n"
-                "- Could not determine user coordinates. Ask user to enable location access for current local weather.\n\n"
+                "- Could not determine weather location. Ask user to enable location access or provide city and state/country.\n\n"
             )
         lat, lon = lat_lon
         use_us_units = self._use_us_units(
@@ -805,6 +849,7 @@ class ChatService:
             weather_context = self._weather_context(
                 user_location_label=user_location_label,
                 user_timezone=user_timezone,
+                question=question,
             )
         market_context = ""
         if self._needs_market_context(question):
