@@ -58,6 +58,18 @@
       opacity: 0;
       animation: fadeIn 450ms ease forwards;
     }
+    .app.sidebar-hidden {
+      grid-template-columns: 0 1fr;
+    }
+    .app.sidebar-hidden aside {
+      width: 0;
+      min-width: 0;
+      padding: 0;
+      opacity: 0;
+      border-right: none;
+      pointer-events: none;
+      overflow: hidden;
+    }
     @keyframes fadeIn {
       to { transform: translateY(0); opacity: 1; }
     }
@@ -164,6 +176,22 @@
       align-items: center;
       justify-content: space-between;
       gap: 12px;
+    }
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .sidebar-toggle {
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      font-weight: 700;
+      font-size: 12px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-family: "Space Grotesk", sans-serif;
     }
     .title {
       font-family: "Space Grotesk", sans-serif;
@@ -476,6 +504,9 @@
         <div>
           <div class="title">Conversation</div>
         </div>
+        <div class="header-actions">
+          <button id="toggleSidebarBtn" class="sidebar-toggle" type="button">Hide Sidebar</button>
+        </div>
       </header>
       <section id="chat"></section>
       <form id="form">
@@ -507,7 +538,10 @@
     const upgradePro10BtnEl = document.getElementById("upgradePro10Btn");
     const manageBillingBtnEl = document.getElementById("manageBillingBtn");
     const authStatusEl = document.getElementById("authStatus");
+    const appEl = document.querySelector(".app");
+    const toggleSidebarBtnEl = document.getElementById("toggleSidebarBtn");
     const KEY = "trent_gpt_conversation_id";
+    const SIDEBAR_KEY = "cortex_sidebar_hidden";
     let conversationId = localStorage.getItem(KEY) || null;
     let currentUser = null;
     const MAX_RENDERED_ITEMS = 220;
@@ -516,6 +550,12 @@
     let userLocationLabel = null;
     let pendingFiles = [];
     let uploadedFileNames = [];
+    let sidebarHidden = localStorage.getItem(SIDEBAR_KEY) === "true";
+
+    function applySidebarState() {
+      appEl.classList.toggle("sidebar-hidden", sidebarHidden);
+      toggleSidebarBtnEl.textContent = sidebarHidden ? "Show Sidebar" : "Hide Sidebar";
+    }
     let thinkingEl = null;
 
     function fileSizeLabel(bytes) {
@@ -887,6 +927,12 @@
       promptEl.focus();
     });
 
+    toggleSidebarBtnEl.addEventListener("click", () => {
+      sidebarHidden = !sidebarHidden;
+      localStorage.setItem(SIDEBAR_KEY, String(sidebarHidden));
+      applySidebarState();
+    });
+
     async function loginOrRegister() {
       const email = authEmailEl.value.trim();
       const password = authPasswordEl.value;
@@ -982,6 +1028,7 @@
     });
 
     initLocationHint();
+    applySidebarState();
     Promise.all([refreshMe(), loadConversation(), refreshConversationList()]).finally(() => {
       renderAttachmentTray();
       if (!chatEl.children.length) {
