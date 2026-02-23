@@ -487,9 +487,23 @@ class ChatService:
             return None
         return float(match.group(1)), float(match.group(2))
 
+    def _use_us_units(self, user_location_label: str | None, user_timezone: str | None) -> bool:
+        lat_lon = self._parse_lat_lon(user_location_label)
+        if lat_lon:
+            lat, lon = lat_lon
+            in_contiguous_us = 24.0 <= lat <= 49.6 and -125.0 <= lon <= -66.0
+            in_alaska = 51.0 <= lat <= 72.0 and -170.0 <= lon <= -129.0
+            in_hawaii = 18.5 <= lat <= 22.5 and -161.0 <= lon <= -154.0
+            in_puerto_rico = 17.5 <= lat <= 18.7 and -67.5 <= lon <= -65.0
+            if in_contiguous_us or in_alaska or in_hawaii or in_puerto_rico:
+                return True
+        # Fallback when coordinates are unavailable.
+        return bool(user_timezone and user_timezone.startswith("America/"))
+
     def _weather_context(
         self,
         user_location_label: str | None,
+        user_timezone: str | None = None,
     ) -> str:
         lat_lon = self._parse_lat_lon(user_location_label)
         if not lat_lon:
@@ -498,6 +512,14 @@ class ChatService:
                 "- Could not determine user coordinates. Ask user to enable location access for current local weather.\n\n"
             )
         lat, lon = lat_lon
+        use_us_units = self._use_us_units(
+            user_location_label=user_location_label,
+            user_timezone=user_timezone,
+        )
+        temperature_unit = "fahrenheit" if use_us_units else "celsius"
+        wind_unit = "mph" if use_us_units else "kmh"
+        temp_label = "F" if use_us_units else "C"
+        wind_label = "mph" if use_us_units else "km/h"
         try:
             resp = requests.get(
                 "https://api.open-meteo.com/v1/forecast",
@@ -506,6 +528,8 @@ class ChatService:
                     "longitude": lon,
                     "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m",
                     "timezone": "auto",
+                    "temperature_unit": temperature_unit,
+                    "wind_speed_unit": wind_unit,
                 },
                 timeout=8,
             )
@@ -516,9 +540,9 @@ class ChatService:
                 "Live weather context:\n"
                 f"- Coordinates: {lat:.3f}, {lon:.3f}\n"
                 f"- Observation time: {cur.get('time', 'unknown')}\n"
-                f"- Temperature C: {cur.get('temperature_2m', 'unknown')}\n"
-                f"- Feels like C: {cur.get('apparent_temperature', 'unknown')}\n"
-                f"- Wind km/h: {cur.get('wind_speed_10m', 'unknown')}\n"
+                f"- Temperature {temp_label}: {cur.get('temperature_2m', 'unknown')}\n"
+                f"- Feels like {temp_label}: {cur.get('apparent_temperature', 'unknown')}\n"
+                f"- Wind {wind_label}: {cur.get('wind_speed_10m', 'unknown')}\n"
                 f"- Weather code: {cur.get('weather_code', 'unknown')}\n\n"
             )
         except Exception:
@@ -778,7 +802,10 @@ class ChatService:
             )
         weather_context = ""
         if self._needs_weather_context(question):
-            weather_context = self._weather_context(user_location_label=user_location_label)
+            weather_context = self._weather_context(
+                user_location_label=user_location_label,
+                user_timezone=user_timezone,
+            )
         market_context = ""
         if self._needs_market_context(question):
             market_context = self._live_market_context(question=question)
