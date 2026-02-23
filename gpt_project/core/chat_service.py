@@ -563,69 +563,80 @@ class ChatService:
         symbols = self._extract_symbols_from_question(question) or default_symbols
         lines: list[str] = []
 
-        # Source 1: Stooq quotes.
-        try:
-            symbol_param = ",".join(f"{symbol.lower()}.us" for symbol in symbols)
-            url = f"https://stooq.com/q/l/?s={symbol_param}&f=sd2t2ohlcv&h&e=csv"
-            resp = requests.get(url, timeout=8)
-            resp.raise_for_status()
-            reader = csv.DictReader(StringIO(resp.text))
-            rows = list(reader)
-            if rows:
-                lines = ["Live market context (latest quotes):"]
-                for row in rows[:10]:
-                    symbol = (row.get("Symbol") or "").upper()
-                    close = row.get("Close") or "N/A"
-                    date = row.get("Date") or "N/A"
-                    time_val = row.get("Time") or "N/A"
-                    volume = row.get("Volume") or "N/A"
-                    lines.append(
-                        f"- {symbol}: close={close}, date={date}, time={time_val}, volume={volume}"
-                    )
-        except Exception:
-            pass
+        # Source 1: Yahoo chart meta per symbol (reliable for ETFs, indices, and US equities).
+        index_map = {
+            "SPY": "SPY",
+            "QQQ": "QQQ",
+            "DIA": "DIA",
+            "IWM": "IWM",
+            "GSPC": "%5EGSPC",
+            "DJI": "%5EDJI",
+            "IXIC": "%5EIXIC",
+        }
+        yahoo_lines: list[str] = []
+        for symbol in symbols[:10]:
+            key = symbol.upper().lstrip("^")
+            ticker = index_map.get(key, symbol.upper())
+            try:
+                resp = requests.get(
+                    f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}",
+                    params={"range": "1d", "interval": "5m"},
+                    timeout=8,
+                )
+                resp.raise_for_status()
+                payload = resp.json()
+                result = ((payload.get("chart") or {}).get("result") or [])
+                if not result:
+                    continue
+                meta = result[0].get("meta") or {}
+                price = meta.get("regularMarketPrice")
+                prev = meta.get("previousClose")
+                shown_symbol = str(meta.get("symbol") or symbol).upper()
+                if price is None:
+                    continue
+                change_txt = ""
+                if isinstance(prev, (int, float)) and prev:
+                    change_pct = ((float(price) - float(prev)) / float(prev)) * 100.0
+                    change_txt = f", change={change_pct:+.2f}%"
+                yahoo_lines.append(f"- {shown_symbol}: price={price}{change_txt}")
+            except Exception:
+                continue
+        if yahoo_lines:
+            lines = ["Live market context (latest quotes):"] + yahoo_lines
 
-        # Source 2: Yahoo chart meta fallback (no API key).
+        # Source 2: Stooq per symbol fallback.
         if len(lines) <= 1:
-            index_map = {
-                "SPY": "SPY",
-                "QQQ": "QQQ",
-                "DIA": "DIA",
-                "IWM": "IWM",
-                "GSPC": "%5EGSPC",
-                "DJI": "%5EDJI",
-                "IXIC": "%5EIXIC",
-            }
-            yahoo_lines: list[str] = []
-            for symbol in symbols[:6]:
+            stooq_lines: list[str] = []
+            for symbol in symbols[:10]:
                 key = symbol.upper().lstrip("^")
-                ticker = index_map.get(key, symbol.upper())
+                if key in {"GSPC", "DJI", "IXIC"}:
+                    continue
+                stooq_ticker = f"{key.lower()}.us"
                 try:
                     resp = requests.get(
-                        f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}",
-                        params={"range": "1d", "interval": "5m"},
+                        f"https://stooq.com/q/l/?s={stooq_ticker}&f=sd2t2ohlcv&h&e=csv",
                         timeout=8,
                     )
                     resp.raise_for_status()
-                    payload = resp.json()
-                    result = ((payload.get("chart") or {}).get("result") or [])
-                    if not result:
+                    reader = csv.DictReader(StringIO(resp.text))
+                    rows = list(reader)
+                    if not rows:
                         continue
-                    meta = result[0].get("meta") or {}
-                    price = meta.get("regularMarketPrice")
-                    prev = meta.get("previousClose")
-                    shown_symbol = str(meta.get("symbol") or symbol).upper()
-                    if price is None:
+                    row = rows[0]
+                    close = str(row.get("Close") or "").strip()
+                    if not re.match(r"^-?\d+(\.\d+)?$", close):
                         continue
-                    change_txt = ""
-                    if isinstance(prev, (int, float)) and prev:
-                        change_pct = ((float(price) - float(prev)) / float(prev)) * 100.0
-                        change_txt = f", change={change_pct:+.2f}%"
-                    yahoo_lines.append(f"- {shown_symbol}: price={price}{change_txt}")
+                    shown_symbol = str(row.get("Symbol") or key).upper()
+                    date = str(row.get("Date") or "N/A").strip()
+                    time_val = str(row.get("Time") or "N/A").strip()
+                    volume = str(row.get("Volume") or "N/A").strip()
+                    stooq_lines.append(
+                        f"- {shown_symbol}: close={close}, date={date}, time={time_val}, volume={volume}"
+                    )
                 except Exception:
                     continue
-            if yahoo_lines:
-                lines = ["Live market context (latest quotes):"] + yahoo_lines
+            if stooq_lines:
+                lines = ["Live market context (latest quotes):"] + stooq_lines
 
         if lines:
             return "\n".join(lines) + "\n\n"
