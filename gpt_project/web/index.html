@@ -219,6 +219,13 @@
       box-shadow: 0 3px 12px #0f302109;
       animation: pop 170ms ease;
       font-size: 15px;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .bubble-content {
+      min-width: 0;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
     .bubble-content p { margin: 0 0 10px 0; }
     .bubble-content p:last-child { margin-bottom: 0; }
@@ -227,6 +234,10 @@
       padding: 0;
     }
     .bubble-content li { margin: 0 0 5px 0; }
+    .bubble-content a {
+      overflow-wrap: anywhere;
+      word-break: break-all;
+    }
     .bubble-content code {
       background: #eef4ff;
       border: 1px solid #d6e4ff;
