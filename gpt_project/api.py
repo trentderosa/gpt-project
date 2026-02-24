@@ -96,6 +96,8 @@ AUTH_RATE_LIMIT_PER_MIN = int(os.getenv("AUTH_RATE_LIMIT_PER_MIN", "20"))
 AUTH_EMAIL_RATE_LIMIT_PER_15MIN = int(os.getenv("AUTH_EMAIL_RATE_LIMIT_PER_15MIN", "12"))
 FREE_INPUTS_PER_HOUR = int(os.getenv("FREE_INPUTS_PER_HOUR", "30"))
 FREE_IMAGES_PER_HOUR = int(os.getenv("FREE_IMAGES_PER_HOUR", "1"))
+PASSWORD_RESET_TOKEN_TTL_MINUTES = int(os.getenv("PASSWORD_RESET_TOKEN_TTL_MINUTES", "30"))
+PASSWORD_RESET_DEV_MODE = (os.getenv("PASSWORD_RESET_DEV_MODE", "false").strip().lower() == "true")
 SESSION_TTL_DAYS = int(os.getenv("SESSION_TTL_DAYS", "180"))
 SESSION_SLIDING_RENEWAL = os.getenv("SESSION_SLIDING_RENEWAL", "true").strip().lower() == "true"
 SESSION_ABSOLUTE_MAX_DAYS = int(os.getenv("SESSION_ABSOLUTE_MAX_DAYS", "365"))
@@ -321,6 +323,20 @@ class AuthRequest(BaseModel):
 class AuthResponse(BaseModel):
     token: str
     user: dict
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=8, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=160)
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=20, max_length=200)
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 class MeResponse(BaseModel):
@@ -699,6 +715,60 @@ def login(body: AuthRequest, request: Request, response: Response) -> AuthRespon
             "plan": _effective_plan(user),
         },
     )
+
+
+@app.post("/auth/change_password")
+def change_password(body: ChangePasswordRequest, request: Request, response: Response) -> dict:
+    user = _current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated.")
+    if body.current_password == body.new_password:
+        raise HTTPException(status_code=400, detail="New password must be different from current password.")
+    changed = storage.change_password(
+        user_id=int(user["id"]),
+        current_password=body.current_password,
+        new_password=body.new_password,
+    )
+    if not changed:
+        raise HTTPException(status_code=400, detail="Current password is incorrect or password update failed.")
+
+    token = _token_from_request(request)
+    if token:
+        storage.delete_session(token)
+    _clear_session_cookie(response)
+    return {"status": "ok", "detail": "Password changed. Please log in again."}
+
+
+@app.post("/auth/forgot_password")
+def forgot_password(body: ForgotPasswordRequest, request: Request) -> dict:
+    if not auth_rate_limiter.allow(_client_key(request)):
+        raise HTTPException(status_code=429, detail="Too many auth attempts. Try again soon.")
+    email_key = (body.email or "").strip().lower()
+    if email_key and not auth_email_rate_limiter.allow(f"forgot:{email_key}"):
+        raise HTTPException(status_code=429, detail="Too many attempts for this account/email.")
+    token = storage.create_password_reset_token(
+        email=body.email,
+        ttl_minutes=PASSWORD_RESET_TOKEN_TTL_MINUTES,
+    )
+    if PASSWORD_RESET_DEV_MODE and token:
+        return {
+            "status": "ok",
+            "detail": "Password reset token generated (dev mode).",
+            "reset_token": token,
+            "expires_in_minutes": PASSWORD_RESET_TOKEN_TTL_MINUTES,
+        }
+    return {
+        "status": "ok",
+        "detail": "If the account exists, a password reset instruction has been issued.",
+    }
+
+
+@app.post("/auth/reset_password")
+def reset_password(body: ResetPasswordRequest) -> dict:
+    changed = storage.reset_password_with_token(token=body.token, new_password=body.new_password)
+    if not changed:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token.")
+    return {"status": "ok", "detail": "Password reset successful. Please log in."}
 
 
 @app.post("/auth/logout")

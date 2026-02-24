@@ -116,6 +116,17 @@ class ChatStorage:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                    token TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    expires_at DATETIME NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                )
+                """
+            )
             columns = {
                 row["name"]
                 for row in conn.execute("PRAGMA table_info(conversations)").fetchall()
@@ -384,6 +395,68 @@ class ChatStorage:
             "stripe_subscription_id": row["stripe_subscription_id"],
             "created_at": row["created_at"],
         }
+
+    def change_password(self, user_id: int, current_password: str, new_password: str) -> bool:
+        if len(new_password or "") < 8:
+            return False
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT password_hash FROM users WHERE id = ?",
+                (user_id,),
+            ).fetchone()
+            if not row:
+                return False
+            if not self._verify_password(current_password, row["password_hash"]):
+                return False
+            new_hash = self._hash_password(new_password)
+            cur = conn.execute(
+                "UPDATE users SET password_hash = ? WHERE id = ?",
+                (new_hash, user_id),
+            )
+            return cur.rowcount > 0
+
+    def create_password_reset_token(self, email: str, ttl_minutes: int = 30) -> str | None:
+        normalized = (email or "").strip().lower()
+        if not normalized:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM users WHERE email = ?",
+                (normalized,),
+            ).fetchone()
+            if not row:
+                return None
+            user_id = int(row["id"])
+            token = secrets.token_urlsafe(40)
+            expires_at = datetime.now(timezone.utc) + timedelta(minutes=max(ttl_minutes, 5))
+            conn.execute("DELETE FROM password_reset_tokens WHERE user_id = ?", (user_id,))
+            conn.execute(
+                "INSERT INTO password_reset_tokens (token, user_id, expires_at) VALUES (?, ?, ?)",
+                (token, user_id, expires_at.strftime("%Y-%m-%d %H:%M:%S")),
+            )
+            return token
+
+    def reset_password_with_token(self, token: str, new_password: str) -> bool:
+        if len(new_password or "") < 8:
+            return False
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT user_id
+                FROM password_reset_tokens
+                WHERE token = ? AND expires_at > ?
+                """,
+                ((token or "").strip(), now),
+            ).fetchone()
+            if not row:
+                return False
+            user_id = int(row["user_id"])
+            new_hash = self._hash_password(new_password)
+            conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (new_hash, user_id))
+            conn.execute("DELETE FROM password_reset_tokens WHERE user_id = ?", (user_id,))
+            conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
+            return True
 
     def create_session(self, user_id: int, ttl_days: int = 180) -> str:
         token = secrets.token_urlsafe(48)
