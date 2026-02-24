@@ -534,10 +534,10 @@
         <button id="send" class="send" type="submit">Send</button>
         <div id="attachmentTray" class="attachment-tray" aria-live="polite"></div>
         <div id="starterPrompts" class="starter-prompts">
-          <button class="starter-chip" type="button" data-prompt="What is the weather in Harrisonburg, VA right now?">Weather</button>
-          <button class="starter-chip" type="button" data-prompt="What is SPY and QQQ doing today?">Markets</button>
-          <button class="starter-chip" type="button" data-prompt="Summarize the latest AI news headlines.">AI News</button>
-          <button class="starter-chip" type="button" data-prompt="Help me improve my resume for software internships.">Resume Help</button>
+          <button class="starter-chip" type="button" data-action="weather">Weather</button>
+          <button class="starter-chip" type="button" data-action="markets">Markets</button>
+          <button class="starter-chip" type="button" data-action="ai_news">AI News</button>
+          <button class="starter-chip" type="button" data-action="resume">Resume Help</button>
         </div>
       </form>
     </main>
@@ -825,6 +825,23 @@
       );
     }
 
+    async function resolveUserLocationLabel() {
+      if (userLocationLabel) return userLocationLabel;
+      if (!navigator.geolocation) return null;
+      return new Promise((resolve) => {
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            const lat = pos.coords.latitude.toFixed(3);
+            const lon = pos.coords.longitude.toFixed(3);
+            userLocationLabel = `${lat}, ${lon}`;
+            resolve(userLocationLabel);
+          },
+          () => resolve(null),
+          { enableHighAccuracy: false, timeout: 6000, maximumAge: 300000 }
+        );
+      });
+    }
+
     async function sendMessage(message) {
       sendEl.disabled = true;
       attachBtnEl.disabled = true;
@@ -1016,7 +1033,24 @@
     starterPromptsEl?.addEventListener("click", async (e) => {
       const btn = e.target.closest(".starter-chip");
       if (!btn) return;
-      const message = btn.getAttribute("data-prompt") || "";
+      const action = btn.getAttribute("data-action") || "";
+      let message = "";
+      if (action === "weather") {
+        const label = await resolveUserLocationLabel();
+        if (label) {
+          message = `What is the weather right now at ${label}? Include temperature, feels-like, and wind speed.`;
+        } else {
+          message = "What is the weather at my current location right now? If location is unavailable, ask me for my city.";
+        }
+      } else if (action === "markets") {
+        message = "What are SPY, QQQ, and DIA doing right now? Give prices and percent changes.";
+      } else if (action === "ai_news") {
+        message = "What are the latest AI headlines right now? Give a concise summary.";
+      } else if (action === "resume") {
+        message = "Help me improve my resume for software internships. Start by asking what role I am targeting.";
+      } else {
+        message = btn.getAttribute("data-prompt") || "";
+      }
       if (!message) return;
       promptEl.value = "";
       addBubble(message, "user");
