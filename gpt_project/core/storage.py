@@ -458,6 +458,24 @@ class ChatStorage:
             conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
             return True
 
+    def reset_password_by_email(self, email: str, new_password: str) -> bool:
+        normalized = (email or "").strip().lower()
+        if not normalized or len(new_password or "") < 8:
+            return False
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM users WHERE email = ?",
+                (normalized,),
+            ).fetchone()
+            if not row:
+                return False
+            user_id = int(row["id"])
+            new_hash = self._hash_password(new_password)
+            conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (new_hash, user_id))
+            conn.execute("DELETE FROM password_reset_tokens WHERE user_id = ?", (user_id,))
+            conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
+            return True
+
     def create_session(self, user_id: int, ttl_days: int = 180) -> str:
         token = secrets.token_urlsafe(48)
         expires_at = datetime.now(timezone.utc) + timedelta(days=max(ttl_days, 1))

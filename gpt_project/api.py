@@ -339,6 +339,11 @@ class ResetPasswordRequest(BaseModel):
     new_password: str = Field(min_length=8, max_length=128)
 
 
+class ResetPasswordByEmailRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=160)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
 class MeResponse(BaseModel):
     user: dict
     usage_last_hour: int
@@ -768,6 +773,19 @@ def reset_password(body: ResetPasswordRequest) -> dict:
     changed = storage.reset_password_with_token(token=body.token, new_password=body.new_password)
     if not changed:
         raise HTTPException(status_code=400, detail="Invalid or expired reset token.")
+    return {"status": "ok", "detail": "Password reset successful. Please log in."}
+
+
+@app.post("/auth/reset_password_email")
+def reset_password_email(body: ResetPasswordByEmailRequest, request: Request) -> dict:
+    if not auth_rate_limiter.allow(_client_key(request)):
+        raise HTTPException(status_code=429, detail="Too many auth attempts. Try again soon.")
+    email_key = (body.email or "").strip().lower()
+    if email_key and not auth_email_rate_limiter.allow(f"reset_email:{email_key}"):
+        raise HTTPException(status_code=429, detail="Too many attempts for this account/email.")
+    changed = storage.reset_password_by_email(email=body.email, new_password=body.new_password)
+    if not changed:
+        raise HTTPException(status_code=400, detail="Password reset failed for this email.")
     return {"status": "ok", "detail": "Password reset successful. Please log in."}
 
 

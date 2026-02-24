@@ -522,8 +522,6 @@
         <div class="auth-actions">
           <button id="continueAuthBtn" type="button">Continue</button>
         </div>
-        <button id="forgotPasswordBtn" type="button" class="auth-secondary">Forgot Password</button>
-        <input id="resetToken" type="text" placeholder="Reset token" autocomplete="one-time-code">
         <input id="resetNewPassword" type="password" placeholder="New password (8+ chars)" autocomplete="new-password">
         <div class="auth-actions">
           <button id="resetPasswordBtn" type="button">Reset Password</button>
@@ -584,8 +582,6 @@
     const authEmailEl = document.getElementById("authEmail");
     const authPasswordEl = document.getElementById("authPassword");
     const continueAuthBtnEl = document.getElementById("continueAuthBtn");
-    const forgotPasswordBtnEl = document.getElementById("forgotPasswordBtn");
-    const resetTokenEl = document.getElementById("resetToken");
     const resetNewPasswordEl = document.getElementById("resetNewPassword");
     const resetPasswordBtnEl = document.getElementById("resetPasswordBtn");
     const logoutBtnEl = document.getElementById("logoutBtn");
@@ -683,8 +679,6 @@
       authEmailEl.style.display = loggedIn ? "none" : "";
       authPasswordEl.style.display = loggedIn ? "none" : "";
       continueAuthBtnEl.style.display = loggedIn ? "none" : "";
-      forgotPasswordBtnEl.style.display = loggedIn ? "none" : "";
-      resetTokenEl.style.display = loggedIn ? "none" : "";
       resetNewPasswordEl.style.display = loggedIn ? "none" : "";
       resetPasswordBtnEl.style.display = loggedIn ? "none" : "";
       logoutBtnEl.style.display = loggedIn ? "" : "none";
@@ -1164,37 +1158,11 @@
       }
     }
 
-    async function requestPasswordReset() {
-      const email = authEmailEl.value.trim();
-      if (!email) {
-        addBubble("Error: Enter your email first.", "bot", "error");
-        return;
-      }
-      try {
-        const res = await fetch("/auth/forgot_password", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email })
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || "Could not start password reset");
-        authStatusEl.textContent = data.detail || "Password reset requested.";
-        if (data.reset_token) {
-          resetTokenEl.value = data.reset_token;
-          addMeta("Reset token generated and filled. Enter a new password, then click Reset Password.");
-        } else {
-          addMeta("Password reset requested. Check your configured delivery channel for the reset token.");
-        }
-      } catch (err) {
-        addBubble("Error: " + err.message, "bot", "error");
-      }
-    }
-
     async function submitPasswordReset() {
-      const token = resetTokenEl.value.trim();
+      const email = authEmailEl.value.trim();
       const newPassword = resetNewPasswordEl.value;
-      if (!token || !newPassword) {
-        addBubble("Error: Enter reset token and new password.", "bot", "error");
+      if (!email || !newPassword) {
+        addBubble("Error: Enter email and new password.", "bot", "error");
         return;
       }
       if (newPassword.length < 8) {
@@ -1202,15 +1170,14 @@
         return;
       }
       try {
-        const res = await fetch("/auth/reset_password", {
+        const res = await fetch("/auth/reset_password_email", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token, new_password: newPassword })
+          body: JSON.stringify({ email, new_password: newPassword })
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || "Password reset failed");
         authPasswordEl.value = newPassword;
-        resetTokenEl.value = "";
         resetNewPasswordEl.value = "";
         authStatusEl.textContent = data.detail || "Password reset successful. Please log in.";
         addMeta("Password reset successful. Use Continue to log in.");
@@ -1220,7 +1187,6 @@
     }
 
     continueAuthBtnEl.addEventListener("click", loginOrRegister);
-    forgotPasswordBtnEl.addEventListener("click", requestPasswordReset);
     resetPasswordBtnEl.addEventListener("click", submitPasswordReset);
     authPasswordEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
