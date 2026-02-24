@@ -31,6 +31,8 @@ If live data retrieval fails, still provide a useful best-effort answer and clea
 Always attempt live/web retrieval before answering.
 When the user asks for code, respond with a clean markdown code block using the correct language tag and proper indentation.
 For simple code requests, keep explanation brief and prioritize readable code/output formatting.
+Prefer clear markdown structure when useful: short headings, bullet points, numbered steps, and code fences.
+Do not wrap every answer in markdown; choose plain text for short/simple replies.
 Use the user profile context to remember the user's name, facts they shared, and mirror their writing style."""
 
 TIME_QUERY_HINTS = {
@@ -439,10 +441,8 @@ class ChatService:
 
         # Protect fenced code blocks from punctuation/capitalization rewrites.
         code_blocks = re.findall(r"```[\s\S]*?```", cleaned)
-        placeholders: list[str] = []
         for i, block in enumerate(code_blocks):
             token = f"__CODE_BLOCK_{i}__"
-            placeholders.append(token)
             cleaned = cleaned.replace(block, token, 1)
 
         # Normalize spacing.
@@ -451,26 +451,30 @@ class ChatService:
         cleaned = re.sub(r"([,.!?;:])([A-Za-z])", r"\1 \2", cleaned)
         cleaned = re.sub(r"\bi\b", "I", cleaned)
 
-        # Capitalize sentence starts.
-        parts = re.split(r"([.!?]\s+)", cleaned)
-        rebuilt = []
-        for part in parts:
-            if not part:
-                continue
-            if re.match(r"[.!?]\s+", part):
-                rebuilt.append(part)
-                continue
-            segment = list(part)
-            for i, ch in enumerate(segment):
-                if ch.isalpha():
-                    segment[i] = ch.upper()
-                    break
-            rebuilt.append("".join(segment))
-        cleaned = "".join(rebuilt).strip()
+        has_markdown_layout = bool(
+            re.search(r"(?m)^\s*(?:[-*]\s+|\d+\.\s+|#{1,6}\s+|>\s+)", cleaned)
+        )
+        if not has_markdown_layout:
+            # Capitalize sentence starts for plain text responses.
+            parts = re.split(r"([.!?]\s+)", cleaned)
+            rebuilt = []
+            for part in parts:
+                if not part:
+                    continue
+                if re.match(r"[.!?]\s+", part):
+                    rebuilt.append(part)
+                    continue
+                segment = list(part)
+                for i, ch in enumerate(segment):
+                    if ch.isalpha():
+                        segment[i] = ch.upper()
+                        break
+                rebuilt.append("".join(segment))
+            cleaned = "".join(rebuilt).strip()
 
-        # Ensure terminal punctuation when response ends in alphanumeric text.
-        if cleaned[-1].isalnum():
-            cleaned += "."
+            # Ensure terminal punctuation when response ends in alphanumeric text.
+            if cleaned[-1].isalnum():
+                cleaned += "."
 
         # Restore code blocks unchanged.
         for i, block in enumerate(code_blocks):
