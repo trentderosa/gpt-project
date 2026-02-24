@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 import re
 import xml.etree.ElementTree as ET
 import time
+import html
 from zoneinfo import ZoneInfo
 import requests
 import csv
@@ -408,6 +409,23 @@ class ChatService:
         if not cleaned:
             return "I could not generate a response."
 
+        # Convert HTML-style code blocks to markdown fences.
+        cleaned = re.sub(
+            r"<pre>\s*<code[^>]*>([\s\S]*?)</code>\s*</pre>",
+            lambda m: f"```\n{html.unescape(m.group(1)).strip()}\n```",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = html.unescape(cleaned)
+
+        # Protect fenced code blocks from punctuation/capitalization rewrites.
+        code_blocks = re.findall(r"```[\s\S]*?```", cleaned)
+        placeholders: list[str] = []
+        for i, block in enumerate(code_blocks):
+            token = f"__CODE_BLOCK_{i}__"
+            placeholders.append(token)
+            cleaned = cleaned.replace(block, token, 1)
+
         # Normalize spacing.
         cleaned = re.sub(r"[ \t]+", " ", cleaned)
         cleaned = re.sub(r"\s+\n", "\n", cleaned).strip()
@@ -434,6 +452,10 @@ class ChatService:
         # Ensure terminal punctuation when response ends in alphanumeric text.
         if cleaned[-1].isalnum():
             cleaned += "."
+
+        # Restore code blocks unchanged.
+        for i, block in enumerate(code_blocks):
+            cleaned = cleaned.replace(f"__CODE_BLOCK_{i}__", block)
         return cleaned
 
     def _runtime_time_context(
