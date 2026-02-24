@@ -520,7 +520,8 @@
         <input id="authEmail" type="email" placeholder="Email" autocomplete="username">
         <input id="authPassword" type="password" placeholder="Password" autocomplete="current-password">
         <div class="auth-actions">
-          <button id="continueAuthBtn" type="button">Continue</button>
+          <button id="continueAuthBtn" type="button">Login</button>
+          <button id="registerAuthBtn" type="button">Register</button>
         </div>
         <input id="resetNewPassword" type="password" placeholder="New password (8+ chars)" autocomplete="new-password">
         <div class="auth-actions">
@@ -582,6 +583,7 @@
     const authEmailEl = document.getElementById("authEmail");
     const authPasswordEl = document.getElementById("authPassword");
     const continueAuthBtnEl = document.getElementById("continueAuthBtn");
+    const registerAuthBtnEl = document.getElementById("registerAuthBtn");
     const resetNewPasswordEl = document.getElementById("resetNewPassword");
     const resetPasswordBtnEl = document.getElementById("resetPasswordBtn");
     const logoutBtnEl = document.getElementById("logoutBtn");
@@ -679,6 +681,7 @@
       authEmailEl.style.display = loggedIn ? "none" : "";
       authPasswordEl.style.display = loggedIn ? "none" : "";
       continueAuthBtnEl.style.display = loggedIn ? "none" : "";
+      registerAuthBtnEl.style.display = loggedIn ? "none" : "";
       resetNewPasswordEl.style.display = loggedIn ? "none" : "";
       resetPasswordBtnEl.style.display = loggedIn ? "none" : "";
       logoutBtnEl.style.display = loggedIn ? "" : "none";
@@ -765,6 +768,7 @@
       const lines = withCodeBlocks.split("\n");
       const chunks = [];
       let listBuffer = [];
+      let orderedListBuffer = [];
 
       const flushList = () => {
         if (!listBuffer.length) return;
@@ -772,26 +776,51 @@
         chunks.push(`<ul>${items}</ul>`);
         listBuffer = [];
       };
+      const flushOrderedList = () => {
+        if (!orderedListBuffer.length) return;
+        const items = orderedListBuffer.map(item => `<li>${formatInline(item)}</li>`).join("");
+        chunks.push(`<ol>${items}</ol>`);
+        orderedListBuffer = [];
+      };
 
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed) {
           flushList();
+          flushOrderedList();
           continue;
         }
         if (trimmed.startsWith("<pre><code>") && trimmed.endsWith("</code></pre>")) {
           flushList();
+          flushOrderedList();
           chunks.push(trimmed);
           continue;
         }
+        if (/^#{1,3}\s+/.test(trimmed)) {
+          flushList();
+          flushOrderedList();
+          const level = Math.min((trimmed.match(/^#+/) || ["#"])[0].length, 3);
+          const title = trimmed.replace(/^#{1,3}\s+/, "");
+          chunks.push(`<h${level}>${formatInline(title)}</h${level}>`);
+          continue;
+        }
         if (trimmed.startsWith("- ")) {
+          flushOrderedList();
           listBuffer.push(trimmed.slice(2));
           continue;
         }
+        const numbered = trimmed.match(/^\d+\.\s+(.*)$/);
+        if (numbered) {
+          flushList();
+          orderedListBuffer.push(numbered[1]);
+          continue;
+        }
         flushList();
+        flushOrderedList();
         chunks.push(`<p>${formatInline(trimmed)}</p>`);
       }
       flushList();
+      flushOrderedList();
       return chunks.join("");
     }
 
@@ -1123,27 +1152,17 @@
       applySidebarState();
     });
 
-    async function loginOrRegister() {
+    async function loginOnly() {
       const email = authEmailEl.value.trim();
       const password = authPasswordEl.value;
       if (!email || !password) return;
       try {
-        // Try login first for existing users.
-        let res = await fetch("/auth/login", {
+        const res = await fetch("/auth/login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email, password })
         });
-        let data = await res.json();
-        // If user does not exist, create account automatically.
-        if (!res.ok && String(data.detail || "").toLowerCase().includes("invalid email or password")) {
-          res = await fetch("/auth/register", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ email, password })
-          });
-          data = await res.json();
-        }
+        const data = await res.json();
         if (!res.ok) throw new Error(data.detail || "Authentication failed");
         setAuthState(data.user);
         authPasswordEl.value = "";
@@ -1151,6 +1170,31 @@
         localStorage.removeItem(KEY);
         chatEl.innerHTML = "";
         addMeta("Signed in.");
+        await refreshMe();
+        await refreshConversationList();
+      } catch (err) {
+        addBubble("Error: " + err.message, "bot", "error");
+      }
+    }
+
+    async function registerOnly() {
+      const email = authEmailEl.value.trim();
+      const password = authPasswordEl.value;
+      if (!email || !password) return;
+      try {
+        const res = await fetch("/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Registration failed");
+        setAuthState(data.user);
+        authPasswordEl.value = "";
+        conversationId = null;
+        localStorage.removeItem(KEY);
+        chatEl.innerHTML = "";
+        addMeta("Account created and signed in.");
         await refreshMe();
         await refreshConversationList();
       } catch (err) {
@@ -1186,12 +1230,13 @@
       }
     }
 
-    continueAuthBtnEl.addEventListener("click", loginOrRegister);
+    continueAuthBtnEl.addEventListener("click", loginOnly);
+    registerAuthBtnEl.addEventListener("click", registerOnly);
     resetPasswordBtnEl.addEventListener("click", submitPasswordReset);
     authPasswordEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
-        loginOrRegister();
+        loginOnly();
       }
     });
     resetNewPasswordEl.addEventListener("keydown", (e) => {
