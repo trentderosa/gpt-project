@@ -29,6 +29,8 @@ Never answer with only 'I don't know based on my notes'.
 For questions about latest/current/live information, do not give outdated cutoff-style answers (for example 'as of 2023').
 If live data retrieval fails, still provide a useful best-effort answer and clearly label uncertainty.
 Always attempt live/web retrieval before answering.
+When the user asks for code, respond with a clean markdown code block using the correct language tag and proper indentation.
+For simple code requests, keep explanation brief and prioritize readable code/output formatting.
 Use the user profile context to remember the user's name, facts they shared, and mirror their writing style."""
 
 TIME_QUERY_HINTS = {
@@ -410,9 +412,26 @@ class ChatService:
             return "I could not generate a response."
 
         # Convert HTML-style code blocks to markdown fences.
+        known_langs = {
+            "python", "py", "javascript", "js", "typescript", "ts", "bash", "sh", "shell",
+            "json", "sql", "html", "css", "java", "c", "cpp", "c++", "csharp", "cs", "go", "rust",
+        }
+
+        def _html_code_to_markdown(match: re.Match) -> str:
+            raw = html.unescape(match.group(1) or "").strip()
+            if not raw:
+                return "```\n```"
+            lines = raw.splitlines()
+            first = lines[0].strip().lower() if lines else ""
+            if first in known_langs and len(lines) > 1:
+                lang = "python" if first == "py" else ("javascript" if first == "js" else first)
+                body = "\n".join(lines[1:]).strip("\n")
+                return f"```{lang}\n{body}\n```"
+            return f"```\n{raw}\n```"
+
         cleaned = re.sub(
             r"<pre>\s*<code[^>]*>([\s\S]*?)</code>\s*</pre>",
-            lambda m: f"```\n{html.unescape(m.group(1)).strip()}\n```",
+            _html_code_to_markdown,
             cleaned,
             flags=re.IGNORECASE,
         )
