@@ -633,6 +633,18 @@
       return fetch(url, opts);
     }
 
+    function isConversationAccessError(status, detail) {
+      const normalized = String(detail || "").toLowerCase();
+      if (status === 404 && normalized.includes("conversation not found")) return true;
+      if (status === 403 && normalized.includes("forbidden for this conversation")) return true;
+      return false;
+    }
+
+    function resetConversationState() {
+      conversationId = null;
+      localStorage.removeItem(KEY);
+    }
+
     function setAuthState(user) {
       currentUser = user || null;
       const loggedIn = !!currentUser;
@@ -842,7 +854,7 @@
       });
     }
 
-    async function sendMessage(message) {
+    async function sendMessage(message, retryOnConversationError = true) {
       sendEl.disabled = true;
       attachBtnEl.disabled = true;
       const chips = starterPromptsEl?.querySelectorAll(".starter-chip") || [];
@@ -857,7 +869,14 @@
             if (conversationId) formData.append("conversation_id", conversationId);
             const uploadRes = await apiFetch("/upload", { method: "POST", body: formData });
             const uploadData = await uploadRes.json();
-            if (!uploadRes.ok) throw new Error(uploadData.detail || "Upload failed");
+            if (!uploadRes.ok) {
+              if (retryOnConversationError && conversationId && isConversationAccessError(uploadRes.status, uploadData.detail)) {
+                resetConversationState();
+                hideThinking();
+                return await sendMessage(message, false);
+              }
+              throw new Error(uploadData.detail || "Upload failed");
+            }
             conversationId = uploadData.conversation_id;
             localStorage.setItem(KEY, conversationId);
             uploadedFileNames.push(uploadData.filename || file.name);
@@ -882,6 +901,11 @@
         });
         if (!res.ok) {
           const data = await res.json();
+          if (retryOnConversationError && conversationId && isConversationAccessError(res.status, data.detail)) {
+            resetConversationState();
+            hideThinking();
+            return await sendMessage(message, false);
+          }
           throw new Error(data.detail || "Request failed");
         }
 
@@ -952,7 +976,13 @@
       if (!conversationId) return;
       try {
         const res = await apiFetch(`/conversations/${conversationId}`);
-        if (!res.ok) return;
+        if (!res.ok) {
+          if (isConversationAccessError(res.status, await res.text())) {
+            resetConversationState();
+            await refreshConversationList();
+          }
+          return;
+        }
         const data = await res.json();
         chatEl.innerHTML = "";
         for (const msg of data.messages.slice(-60)) {
