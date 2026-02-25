@@ -38,12 +38,17 @@ Keep the app online 24/7 and keep live data (news/stocks) updated even when your
 ## Render deployment
 This repo includes `render.yaml` with:
 - `trent-gpt-web` (FastAPI web service with embedded updater enabled)
+- Persistent disk mounted at `/var/data`
+- Database path pinned to `/var/data/gpt_project.db` (survives redeploys/restarts)
 
 ## Important production note
 SQLite is fine for local/single-machine deploys. For multi-service cloud deployments, use a shared database (Postgres) instead of local SQLite files.
 
 If separate web + worker containers run without a shared database, they will not share one SQLite file reliably.
 The default `render.yaml` avoids this by running updates inside the web service process (`RUN_UPDATER_IN_API=true`).
+
+For current deployment stability, keep API + updater in one web service and use the mounted Render disk.
+This preserves users, sessions, conversations, and memory across deploys.
 
 ## Billing setup (Stripe)
 - Checkout endpoint: `POST /billing/checkout` (requires login).

@@ -12,12 +12,23 @@ from datetime import datetime, timedelta, timezone
 from .config import BASE_DIR
 
 
-DB_PATH = Path(os.getenv("DB_PATH") or (BASE_DIR / "gpt_project.db"))
+def _default_db_path() -> Path:
+    configured = (os.getenv("DB_PATH") or "").strip()
+    if configured:
+        return Path(configured)
+    # On Render, use mounted persistent disk when available.
+    if (os.getenv("RENDER") or "").strip().lower() == "true":
+        return Path("/var/data/gpt_project.db")
+    return BASE_DIR / "gpt_project.db"
+
+
+DB_PATH = _default_db_path()
 
 
 class ChatStorage:
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
