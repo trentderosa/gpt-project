@@ -1031,3 +1031,82 @@ class ChatService:
             self.history.append({"role": "user", "content": question})
             self.history.append({"role": "assistant", "content": answer})
         return answer, hits, web_results, updated_profile
+
+    def ask_stream(self, question, history=None, use_web_search=True,
+                   user_timezone=None, user_utc_offset_minutes=None,
+                   user_location_label=None, user_profile=None, uploaded_file_context=None):
+        normalized_question = question.strip().lower()
+        if normalized_question in ACK_MESSAGES:
+            short_reply = "Okay."
+            eff_h = history if history is not None else self.history
+            up = self._merge_user_profile(user_profile or {}, question, eff_h)
+            if history is None:
+                self.history.append({"role": "user", "content": question})
+                self.history.append({"role": "assistant", "content": short_reply})
+            yield ("done", {"answer": short_reply, "hits": [], "web_results": [], "updated_profile": up})
+            return
+        hits = retrieve_context(question, self.chunks, top_k=TOP_K)
+        has_strong = bool(hits and hits[0][0] >= MIN_SCORE)
+        context = ("\n\n".join(f"[source={src} score={sc:.3f}]\n{txt}" for sc, src, txt in hits) if has_strong else "")
+        web_results = self._search_live_web(question, max_results=5) if use_web_search else []
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        eff_h = history if history is not None else self.history
+        updated_profile = self._merge_user_profile(user_profile or {}, question, eff_h)
+        profile_ctx = self._profile_context_block(updated_profile)
+        messages.extend(self._trim_history(eff_h))
+        runtime_ctx = self._runtime_time_context(user_timezone=user_timezone, user_utc_offset_minutes=user_utc_offset_minutes, user_location_label=user_location_label) if (self._needs_runtime_time_context(question) or self._is_current_events_query(question)) else ""
+        weather_ctx = self._weather_context(user_location_label=user_location_label, user_timezone=user_timezone, question=question) if self._needs_weather_context(question) else ""
+        market_ctx = self._live_market_context(question=question) if self._needs_market_context(question) else ""
+        news_ctx = ""
+        if self._needs_news_context(question):
+            news_ctx = self._live_news_context()
+            tn = self._topic_news_context(question)
+            if tn:
+                news_ctx += tn
+        web_ctx = ("\n\nWeb results:\n" + "\n".join("- " + str(i.get("title", "Untitled")) + ": " + str(i.get("snippet", "")) + " (" + str(i.get("url", "")) + ")" for i in web_results)) if web_results else ""
+        note_blk = ("Context from local notes:\n" + context + "\n\n") if context else ""
+        live = bool(web_results) or bool(market_ctx.strip()) or bool(news_ctx.strip()) or bool(weather_ctx.strip())
+        anti_r = "" if has_strong else "Instruction: If local notes do not cover this, answer from general knowledge.\n\n"
+        anti_s = ("Instruction: Use the live context provided above. Do not reference training cutoff dates.\n\n" if self._is_current_events_query(question) and live else "")
+        messages.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+profile_ctx+(uploaded_file_context or "")+note_blk+anti_r+anti_s+"User question:\n"+question+web_ctx})
+        streamed = []
+        try:
+            for token in self.llm.chat_stream(messages=messages):
+                streamed.append(token)
+                yield ("token", token)
+            answer = "".join(streamed).strip() or "I could not generate a full answer. Please try again."
+        except Exception:
+            answer = self.llm.chat(messages=messages)
+            yield ("replace", answer)
+        if self._looks_like_notes_refusal(answer):
+            fbk = [{"role": "system", "content": SYSTEM_PROMPT}]
+            fbk.extend(self._trim_history(eff_h))
+            fbk.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+profile_ctx+(uploaded_file_context or "")+"Question: "+question+"\n\nGive a direct answer using general knowledge. If uncertain, state uncertainty briefly, then still provide your best useful answer."})
+            answer = self.llm.chat(messages=fbk)
+            yield ("replace", answer)
+        if self._is_current_events_query(question) and self._looks_stale_current_answer(answer):
+            if not live:
+                if self._needs_market_context(question):
+                    answer = self._market_answer_fallback(market_context=market_ctx, web_results=web_results)
+                else:
+                    sf = [{"role": "system", "content": SYSTEM_PROMPT}]
+                    sf.extend(self._trim_history(eff_h))
+                    sf.append({"role": "user", "content": runtime_ctx+profile_ctx+"Question: "+question+"\n\nGive a useful best-effort answer without claiming live retrieval is unavailable. Be explicit about uncertainty, but still answer directly."})
+                    answer = self.llm.chat(messages=sf)
+                yield ("replace", answer)
+            else:
+                sf = [{"role": "system", "content": SYSTEM_PROMPT}]
+                sf.extend(self._trim_history(eff_h))
+                sf.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+profile_ctx+"Question: "+question+"\n\nRewrite your answer using available live context only. Do not mention training cutoff dates."})
+                answer = self.llm.chat(messages=sf)
+                yield ("replace", answer)
+        if self._needs_market_context(question):
+            forced = self._market_answer_fallback(market_context=market_ctx, web_results=web_results)
+            if forced and (self._looks_like_market_deflection(answer) or not self._answer_contains_market_snapshot(answer)):
+                answer = forced
+                yield ("replace", answer)
+        answer = self._normalize_response_punctuation(answer)
+        if history is None:
+            self.history.append({"role": "user", "content": question})
+            self.history.append({"role": "assistant", "content": answer})
+        yield ("done", {"answer": answer, "hits": hits, "web_results": web_results, "updated_profile": updated_profile})

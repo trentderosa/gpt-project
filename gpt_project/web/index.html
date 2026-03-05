@@ -1002,6 +1002,13 @@
               builtAnswer += parsed.token;
               bubble.content.innerHTML = formatMessageText(builtAnswer);
               chatEl.scrollTop = chatEl.scrollHeight;
+            } else if (eventName === "replace" && parsed?.answer) {
+              builtAnswer = parsed.answer;
+              bubble.content.innerHTML = formatMessageText(builtAnswer);
+              chatEl.scrollTop = chatEl.scrollHeight;
+            } else if (eventName === "error") {
+              builtAnswer = parsed?.detail || "An error occurred. Please try again.";
+              bubble.content.innerHTML = formatMessageText(builtAnswer);
             } else if (eventName === "done") {
               finalPayload = parsed;
             }

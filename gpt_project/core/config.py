@@ -9,6 +9,6 @@ WEB_DIR = BASE_DIR / "gpt_project" / "web"
 DEFAULT_MODEL = "gpt-4o-mini"
 TOP_K = 4
 CHUNK_SIZE = 700
-MIN_SCORE = 0.15
+MIN_SCORE = 1.5
 
 WEB_SEARCH_PROVIDER = os.getenv("WEB_SEARCH_PROVIDER", "multi").strip().lower()

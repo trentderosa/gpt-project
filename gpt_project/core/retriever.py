@@ -48,7 +48,7 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE) -> list[str]:
 
 def load_knowledge_chunks(knowledge_dir: Path = KNOWLEDGE_DIR) -> list[tuple[str, str]]:
     chunks: list[tuple[str, str]] = []
-    for file_path in glob.glob(str(knowledge_dir / "*.txt")):
+    for file_path in sorted(glob.glob(str(knowledge_dir / "*.txt")) + glob.glob(str(knowledge_dir / "*.md"))):
         with open(file_path, "r", encoding="utf-8", errors="ignore") as file:
             text = file.read()
         for chunk in chunk_text(text):

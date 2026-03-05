@@ -1230,6 +1230,105 @@ def _stream_text_tokens(text: str):
 
 @app.post("/chat/stream")
 def chat_stream(chat_request: ChatRequest, request: Request):
+    user = _current_user(request)
+    client_key = _client_key(request)
+    if not chat_rate_limiter.allow(client_key):
+        raise HTTPException(status_code=429, detail="Too many chat requests. Please wait a moment.")
+    sanitized_message = _sanitize_chat_message(chat_request.message)
+    if not sanitized_message:
+        raise HTTPException(status_code=400, detail="Message cannot be empty.")
+    conversation_id = chat_request.conversation_id
+    if conversation_id is None:
+        conversation_id = storage.create_conversation(user_id=int(user["id"]) if user else None)
+    else:
+        _conversation_access_check(conversation_id, user)
+    if user:
+        plan = _effective_plan(user)
+        limits = _plan_limits(plan)
+        usage = storage.usage_count_last_hour(int(user["id"]))
+        input_limit = limits.get("inputs_per_hour")
+        if input_limit is not None and usage >= int(input_limit):
+            raise HTTPException(
+                status_code=402,
+                detail=f"{plan} plan limit reached ({input_limit} prompts/hour). Upgrade to continue.",
+            )
+        storage.record_usage_event(int(user["id"]), event_type="chat_input")
+    else:
+        if not anon_input_hour_limiter.allow(f"inputs:{client_key}"):
+            raise HTTPException(
+                status_code=402,
+                detail=f"free plan limit reached ({FREE_INPUTS_PER_HOUR} prompts/hour). Sign in or upgrade to continue.",
+            )
+    history = storage.get_messages(conversation_id)
+    conversation_profile = storage.get_user_profile(conversation_id)
+    user_profile = storage.get_user_memory(int(user["id"])) if user else {}
+    merged_profile = _merge_profiles(conversation_profile, user_profile)
+    uploaded_files = storage.get_uploaded_files(conversation_id, limit=12)
+    uploaded_file_context = _build_uploaded_file_context(uploaded_files)
+    image_prompt = _extract_image_prompt(sanitized_message)
+    if image_prompt is not None:
+        result = chat(chat_request, request)
+        def image_gen():
+            yield f"event: meta\ndata: {json.dumps({'conversation_id': result.conversation_id})}\n\n"
+            payload = {
+                "conversation_id": result.conversation_id,
+                "answer": result.answer,
+                "retrieved_sources": result.retrieved_sources,
+                "web_results": result.web_results,
+                "generated_images": result.generated_images,
+            }
+            yield f"event: done\ndata: {json.dumps(payload)}\n\n"
+        return StreamingResponse(image_gen(), media_type="text/event-stream")
+    def event_gen():
+        yield f"event: meta\ndata: {json.dumps({'conversation_id': conversation_id})}\n\n"
+        final_answer = ""
+        final_hits = []
+        final_web_results = []
+        final_profile = {}
+        try:
+            for event_type, event_data in chat_service.ask_stream(
+                question=sanitized_message,
+                history=history,
+                use_web_search=chat_request.use_web_search,
+                user_timezone=chat_request.user_timezone,
+                user_utc_offset_minutes=chat_request.user_utc_offset_minutes,
+                user_location_label=chat_request.user_location_label,
+                user_profile=merged_profile,
+                uploaded_file_context=uploaded_file_context,
+            ):
+                if event_type == "token":
+                    yield f"event: token\ndata: {json.dumps({'token': event_data})}\n\n"
+                elif event_type == "replace":
+                    yield f"event: replace\ndata: {json.dumps({'answer': event_data})}\n\n"
+                elif event_type == "done":
+                    final_answer = event_data["answer"]
+                    final_hits = event_data["hits"]
+                    final_web_results = event_data["web_results"]
+                    final_profile = event_data["updated_profile"]
+        except Exception as exc:
+            logger.exception("chat_stream_failure error=%s", str(exc))
+            yield f"event: error\ndata: {json.dumps({'detail': 'Temporary server issue. Please try again.'})}\n\n"
+            return
+        storage.add_message(conversation_id, "user", sanitized_message)
+        storage.add_message(conversation_id, "assistant", final_answer)
+        storage.upsert_user_profile(conversation_id, final_profile)
+        if user:
+            storage.upsert_user_memory(int(user["id"]), final_profile)
+        source_rows = [
+            {"source": source, "score": round(score, 3), "preview": text[:180]}
+            for score, source, text in final_hits
+        ]
+        payload = {
+            "conversation_id": conversation_id,
+            "answer": final_answer,
+            "retrieved_sources": source_rows,
+            "web_results": final_web_results,
+            "generated_images": [],
+        }
+        yield f"event: done\ndata: {json.dumps(payload)}\n\n"
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+def chat_stream(chat_request: ChatRequest, request: Request):
     result = chat(chat_request, request)
 
     def event_gen():

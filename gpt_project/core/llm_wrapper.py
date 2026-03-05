@@ -1,4 +1,5 @@
 import os
+from typing import Generator
 import time
 
 from dotenv import load_dotenv
@@ -40,6 +41,20 @@ class LLMWrapper:
         if last_error:
             raise last_error
         return "I couldn't generate a response."
+
+
+    def chat_stream(self, messages: list[dict], temperature: float = 0.2, max_tokens: int = 1500) -> Generator[str, None, None]:
+        """Yield content tokens from the OpenAI streaming API."""
+        stream = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+        )
+        for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
 
     def generate_image(
         self,
