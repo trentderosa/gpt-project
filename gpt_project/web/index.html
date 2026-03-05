@@ -519,6 +519,7 @@
       <div class="auth-box">
         <input id="authEmail" type="email" placeholder="Email" autocomplete="username">
         <input id="authPassword" type="password" placeholder="Password" autocomplete="current-password">
+        <input id="creatorSecret" type="password" placeholder="Creator secret (registration only)" autocomplete="off" style="font-size:0.8em;opacity:0.7;">
         <div class="auth-actions">
           <button id="continueAuthBtn" type="button">Login</button>
           <button id="registerAuthBtn" type="button">Register</button>
@@ -1185,7 +1186,7 @@
         const res = await fetch("/auth/register", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, password })
+          body: JSON.stringify({ email, password, creator_bootstrap_secret: document.getElementById("creatorSecret").value || undefined })
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || "Registration failed");

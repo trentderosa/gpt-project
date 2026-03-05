@@ -932,6 +932,11 @@ class ChatService:
         note_context_block = ""
         if context:
             note_context_block = f"Context from local notes:\n{context}\n\n"
+
+        has_live_signal = bool(web_results) or bool(market_context.strip()) or bool(news_context.strip()) or bool(weather_context.strip())
+        anti_refusal = "" if has_strong_note_context else "Instruction: If local notes do not cover this, answer from general knowledge.\n\n"
+        anti_stale = "Instruction: Use the live context provided above. Do not reference training cutoff dates.\n\n" if self._is_current_events_query(question) and has_live_signal else ""
+
         messages.append(
             {
                 "role": "user",
@@ -943,6 +948,8 @@ class ChatService:
                     f"{profile_context}"
                     f"{uploaded_file_context or ''}"
                     f"{note_context_block}"
+                    f"{anti_refusal}"
+                    f"{anti_stale}"
                     f"User question:\n{question}{web_context}"
                 ),
             }

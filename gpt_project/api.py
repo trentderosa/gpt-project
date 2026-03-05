@@ -778,6 +778,12 @@ def reset_password(body: ResetPasswordRequest) -> dict:
 
 @app.post("/auth/reset_password_email")
 def reset_password_email(body: ResetPasswordByEmailRequest, request: Request) -> dict:
+    # Security guardrail: direct email-based password reset is only for controlled dev/testing.
+    if not PASSWORD_RESET_DEV_MODE:
+        raise HTTPException(
+            status_code=403,
+            detail="Email-based direct password reset is disabled. Use forgot/reset token flow.",
+        )
     if not auth_rate_limiter.allow(_client_key(request)):
         raise HTTPException(status_code=429, detail="Too many auth attempts. Try again soon.")
     email_key = (body.email or "").strip().lower()

@@ -16,7 +16,7 @@ class LLMWrapper:
         self.client = OpenAI(api_key=api_key, timeout=45.0, max_retries=2)
         self.model = model
 
-    def chat(self, messages: list[dict], temperature: float = 0.2, max_tokens: int = 500) -> str:
+    def chat(self, messages: list[dict], temperature: float = 0.2, max_tokens: int = 1500) -> str:
         last_error = None
         for attempt in range(3):
             try:

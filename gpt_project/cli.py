@@ -6,6 +6,7 @@ from .core.chat_service import ChatService
 from .core.config import DEFAULT_MODEL, KNOWLEDGE_DIR
 from .core.llm_wrapper import LLMWrapper
 from .core.retriever import load_knowledge_chunks
+from .core.search_tool import DuckDuckGoSearchTool
 
 
 SMALL_TALK = {"hi", "hello", "hey", "yo", "sup", "what up"}
@@ -24,7 +25,7 @@ def main() -> None:
         raise SystemExit(f"No .txt files found in {KNOWLEDGE_DIR}")
 
     llm = LLMWrapper(model=args.model)
-    chat = ChatService(llm=llm, chunks=chunks)
+    chat = ChatService(llm=llm, chunks=chunks, web_search_tool=DuckDuckGoSearchTool())
 
     print("Cortex Engine running. Type 'exit' to quit.")
     print(f"Loaded {len(chunks)} chunks from {KNOWLEDGE_DIR}\n")
