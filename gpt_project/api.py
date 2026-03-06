@@ -1093,6 +1093,19 @@ def get_live_news(limit: int = 20) -> LiveDataResponse:
     return LiveDataResponse(items=live_store.get_latest("news", limit=limit))
 
 
+def _generate_title(user_msg: str, assistant_msg: str) -> str:
+    try:
+        msgs = [
+            {"role": "system", "content": "Generate a short 4-6 word title for this conversation. Reply with ONLY the title, no punctuation or quotes."},
+            {"role": "user", "content": user_msg[:300]},
+            {"role": "assistant", "content": assistant_msg[:300]},
+            {"role": "user", "content": "Title:"},
+        ]
+        return llm.chat(messages=msgs, max_tokens=20).strip().strip('"').strip("'")[:80]
+    except Exception:
+        return ""
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
     user = _current_user(request)
@@ -1134,6 +1147,12 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
     merged_profile = _merge_profiles(conversation_profile, user_profile)
     uploaded_files = storage.get_uploaded_files(conversation_id, limit=12)
     uploaded_file_context = _build_uploaded_file_context(uploaded_files)
+    if user:
+        _uk = storage.get_user_knowledge_content(int(user["id"]))
+        if _uk:
+            _kparts = ["[" + f["filename"] + "]" + " " + f["content"][:2000] for f in _uk[:5]]
+            _kctx = "User's personal notes:" + " | ".join(_kparts)
+            uploaded_file_context = (uploaded_file_context or "") + "\n\n" + _kctx
     raw_message = sanitized_message
     image_prompt = _extract_image_prompt(raw_message)
 
@@ -1209,6 +1228,11 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
     storage.upsert_user_profile(conversation_id, updated_profile)
     if user:
         storage.upsert_user_memory(int(user["id"]), updated_profile)
+    _msg_count = len(storage.get_messages(conversation_id, limit=3))
+    if _msg_count == 2:
+        _title = _generate_title(sanitized_message, answer)
+        if _title:
+            storage.set_conversation_title(conversation_id, _title)
 
     source_rows = [
         {"source": source, "score": round(score, 3), "preview": text[:180]}
@@ -1265,6 +1289,12 @@ def chat_stream(chat_request: ChatRequest, request: Request):
     merged_profile = _merge_profiles(conversation_profile, user_profile)
     uploaded_files = storage.get_uploaded_files(conversation_id, limit=12)
     uploaded_file_context = _build_uploaded_file_context(uploaded_files)
+    if user:
+        _uk = storage.get_user_knowledge_content(int(user["id"]))
+        if _uk:
+            _kparts = ["[" + f["filename"] + "]" + " " + f["content"][:2000] for f in _uk[:5]]
+            _kctx = "User's personal notes:" + " | ".join(_kparts)
+            uploaded_file_context = (uploaded_file_context or "") + "\n\n" + _kctx
     image_prompt = _extract_image_prompt(sanitized_message)
     if image_prompt is not None:
         result = chat(chat_request, request)
@@ -1314,6 +1344,11 @@ def chat_stream(chat_request: ChatRequest, request: Request):
         storage.upsert_user_profile(conversation_id, final_profile)
         if user:
             storage.upsert_user_memory(int(user["id"]), final_profile)
+        _msg_count = len(storage.get_messages(conversation_id, limit=3))
+        if _msg_count == 2:
+            _title = _generate_title(sanitized_message, final_answer)
+            if _title:
+                storage.set_conversation_title(conversation_id, _title)
         source_rows = [
             {"source": source, "score": round(score, 3), "preview": text[:180]}
             for score, source, text in final_hits
@@ -1345,3 +1380,38 @@ def chat_stream(chat_request: ChatRequest, request: Request):
         yield f"event: done\ndata: {json.dumps(payload)}\n\n"
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
+@app.post("/knowledge")
+async def upload_knowledge(request: Request, file: UploadFile = File(...)) -> dict:
+    user = _current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required to upload personal notes.")
+    if _is_blocked_upload(file.filename, file.content_type):
+        raise HTTPException(status_code=400, detail="This file type is not allowed.")
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="File is empty.")
+    extracted = _extract_uploaded_content(file, payload)
+    file_id = storage.add_user_knowledge_file(int(user["id"]), _safe_filename(file.filename), extracted)
+    return {"id": file_id, "filename": _safe_filename(file.filename)}
+
+
+@app.get("/knowledge")
+def list_knowledge(request: Request) -> dict:
+    user = _current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required.")
+    files = storage.list_user_knowledge_files(int(user["id"]))
+    return {"files": files}
+
+
+@app.delete("/knowledge/{file_id}")
+def delete_knowledge(file_id: int, request: Request) -> dict:
+    user = _current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required.")
+    ok = storage.delete_user_knowledge_file(file_id, int(user["id"]))
+    if not ok:
+        raise HTTPException(status_code=404, detail="File not found.")
+    return {"deleted": True}

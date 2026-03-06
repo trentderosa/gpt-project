@@ -504,6 +504,30 @@
       color: var(--muted);
       margin-top: 3px;
     }
+    .bubble-actions {
+      display: flex;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .bubble-copy-btn, .bubble-retry-btn {
+      border: 1px solid var(--line);
+      background: #f8fbff;
+      color: var(--muted);
+      border-radius: 8px;
+      padding: 3px 9px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      font-family: "Space Grotesk", sans-serif;
+    }
+    .bubble-copy-btn:hover, .bubble-retry-btn:hover { background: #eef4ff; color: var(--ink); }
+    .knowledge-section { margin-top: 6px; }
+    .knowledge-title { font-size: 12px; color: var(--muted); margin-bottom: 6px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
+    .knowledge-list { list-style: none; margin: 6px 0 0 0; padding: 0; display: grid; gap: 4px; max-height: 140px; overflow-y: auto; }
+    .knowledge-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; background: #fff; }
+    .knowledge-item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .knowledge-del-btn { border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 14px; padding: 0 2px; line-height: 1; }
+    .knowledge-del-btn:hover { color: var(--error); }
   </style>
 </head>
 <body>
@@ -539,6 +563,12 @@
       <div class="history-wrap">
         <div class="history-title">Past Conversations</div>
         <ul id="historyList" class="history-list"></ul>
+      </div>
+      <div id="knowledgeSection" class="knowledge-section" style="display:none;">
+        <div class="knowledge-title">My Notes</div>
+        <button id="uploadNoteBtn" class="auth-secondary" type="button">+ Upload Note</button>
+        <input id="noteFileInput" type="file" style="display:none" accept=".txt,.md,.pdf,.docx">
+        <ul id="notesList" class="knowledge-list"></ul>
       </div>
       <div class="legal-links">
         <a href="/privacy" target="_blank" rel="noopener">Privacy</a>
@@ -607,6 +637,12 @@
     let pendingFiles = [];
     let uploadedFileNames = [];
     let sidebarHidden = localStorage.getItem(SIDEBAR_KEY) === "true";
+    const knowledgeSectionEl = document.getElementById("knowledgeSection");
+    const uploadNoteBtnEl = document.getElementById("uploadNoteBtn");
+    const noteFileInputEl = document.getElementById("noteFileInput");
+    const notesListEl = document.getElementById("notesList");
+    let lastUserMessage = null;
+    let lastBotBubble = null;
 
     function applySidebarState() {
       appEl.classList.toggle("sidebar-hidden", sidebarHidden);
@@ -687,8 +723,10 @@
       resetPasswordBtnEl.style.display = loggedIn ? "none" : "";
       logoutBtnEl.style.display = loggedIn ? "" : "none";
       planActionsEl.style.display = loggedIn ? "" : "none";
+      knowledgeSectionEl.style.display = loggedIn ? "" : "none";
       if (!loggedIn) {
         authStatusEl.textContent = "Not logged in. Free mode may be limited.";
+        if (notesListEl) notesListEl.innerHTML = "";
       }
     }
 
@@ -714,6 +752,18 @@
       content.className = "bubble-content";
       content.innerHTML = formatMessageText(text);
       div.appendChild(content);
+      if (role === "bot" && !extraClass.includes("error")) {
+        const actions = document.createElement("div");
+        actions.className = "bubble-actions";
+        const copyBtn = document.createElement("button");
+        copyBtn.type = "button"; copyBtn.className = "bubble-copy-btn"; copyBtn.textContent = "Copy";
+        copyBtn.addEventListener("click", () => {
+          navigator.clipboard.writeText(content.innerText || "").catch(() => {});
+          copyBtn.textContent = "Copied!"; setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500);
+        });
+        actions.appendChild(copyBtn);
+        div.appendChild(actions);
+      }
       chatEl.appendChild(div);
       pruneChatIfNeeded();
       chatEl.scrollTop = chatEl.scrollHeight;
@@ -857,10 +907,21 @@
       content.className = "bubble-content";
       content.innerHTML = formatMessageText(initialText);
       div.appendChild(content);
+      const actions = document.createElement("div");
+      actions.className = "bubble-actions";
+      const copyBtn = document.createElement("button");
+      copyBtn.type = "button"; copyBtn.className = "bubble-copy-btn"; copyBtn.textContent = "Copy";
+      copyBtn.addEventListener("click", () => {
+        navigator.clipboard.writeText(content.innerText || "").catch(() => {});
+        copyBtn.textContent = "Copied!"; setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500);
+      });
+      actions.appendChild(copyBtn);
+      div.appendChild(actions);
       chatEl.appendChild(div);
       pruneChatIfNeeded();
       chatEl.scrollTop = chatEl.scrollHeight;
-      return { div, content };
+      lastBotBubble = { div, content, actions };
+      return lastBotBubble;
     }
 
     function showThinking() {
@@ -1080,7 +1141,7 @@
           li.className = "history-item";
           const btn = document.createElement("button");
           if (convo.conversation_id === conversationId) btn.classList.add("active");
-          btn.innerHTML = `<span class="history-preview">${convo.preview || "New conversation"}</span><span class="history-time">${fmtDate(convo.last_message_at || convo.created_at)}</span>`;
+          btn.innerHTML = `<span class="history-preview">${convo.title || convo.preview || "New conversation"}</span><span class="history-time">${fmtDate(convo.last_message_at || convo.created_at)}</span>`;
           btn.addEventListener("click", async () => {
             conversationId = convo.conversation_id;
             localStorage.setItem(KEY, conversationId);
@@ -1100,9 +1161,22 @@
       e.preventDefault();
       const message = promptEl.value.trim();
       if (!message) return;
+      lastUserMessage = message;
       promptEl.value = "";
       addBubble(message, "user");
       await sendMessage(message);
+      if (lastBotBubble) {
+        const retryBtn = document.createElement("button");
+        retryBtn.type = "button"; retryBtn.className = "bubble-retry-btn"; retryBtn.textContent = "Retry";
+        retryBtn.addEventListener("click", async () => {
+          if (!lastUserMessage) return;
+          retryBtn.disabled = true;
+          lastUserMessage = lastUserMessage;
+          addBubble(lastUserMessage, "user");
+          await sendMessage(lastUserMessage);
+        });
+        lastBotBubble.actions.appendChild(retryBtn);
+      }
     });
 
     attachBtnEl.addEventListener("click", () => {
@@ -1174,11 +1248,17 @@
         if (!res.ok) throw new Error(data.detail || "Authentication failed");
         setAuthState(data.user);
         authPasswordEl.value = "";
-        conversationId = null;
-        localStorage.removeItem(KEY);
         chatEl.innerHTML = "";
         addMeta("Signed in.");
         await refreshMe();
+        const _lr = await apiFetch("/conversations?limit=1");
+        if (_lr.ok) {
+          const _ld = await _lr.json();
+          const _lc = _ld.conversations?.[0];
+          if (_lc) { conversationId = _lc.conversation_id; localStorage.setItem(KEY, conversationId); await loadConversation(); }
+          else { conversationId = null; localStorage.removeItem(KEY); }
+        } else { conversationId = null; localStorage.removeItem(KEY); }
+        await refreshNotes();
         await refreshConversationList();
       } catch (err) {
         addBubble("Error: " + err.message, "bot", "error");
@@ -1305,9 +1385,46 @@
       }
     });
 
+    async function refreshNotes() {
+      if (!currentUser || !notesListEl) return;
+      try {
+        const res = await apiFetch("/knowledge");
+        if (!res.ok) return;
+        const data = await res.json();
+        notesListEl.innerHTML = "";
+        for (const f of data.files || []) {
+          const li = document.createElement("li");
+          li.className = "knowledge-item";
+          li.innerHTML = `<span class="knowledge-item-name" title="${f.filename}">${f.filename}</span>`;
+          const delBtn = document.createElement("button");
+          delBtn.type = "button"; delBtn.className = "knowledge-del-btn"; delBtn.title = "Delete"; delBtn.textContent = "×";
+          delBtn.addEventListener("click", async () => {
+            await apiFetch("/knowledge/" + f.id, { method: "DELETE" });
+            await refreshNotes();
+          });
+          li.appendChild(delBtn);
+          notesListEl.appendChild(li);
+        }
+      } catch (_) {}
+    }
+
+    uploadNoteBtnEl.addEventListener("click", () => noteFileInputEl.click());
+    noteFileInputEl.addEventListener("change", async () => {
+      const file = noteFileInputEl.files?.[0];
+      if (!file) return;
+      const fd = new FormData();
+      fd.append("file", file);
+      try {
+        const res = await apiFetch("/knowledge", { method: "POST", body: fd });
+        if (!res.ok) { const d = await res.json(); addBubble("Upload failed: " + (d.detail || "Unknown error"), "bot", "error"); return; }
+        await refreshNotes();
+      } catch (err) { addBubble("Upload error: " + err.message, "bot", "error"); }
+      noteFileInputEl.value = "";
+    });
+
     initLocationHint();
     applySidebarState();
-    Promise.all([refreshMe(), loadConversation(), refreshConversationList()]).finally(() => {
+    Promise.all([refreshMe(), loadConversation(), refreshConversationList(), refreshNotes()]).finally(() => {
       renderAttachmentTray();
       if (!chatEl.children.length) {
         addMeta("Cortex Engine by Trent DeRosa. Ask anything.");

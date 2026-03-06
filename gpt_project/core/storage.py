@@ -129,6 +129,18 @@ class ChatStorage:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS user_knowledge_files (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    filename TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS password_reset_tokens (
                     token TEXT PRIMARY KEY,
                     user_id INTEGER NOT NULL,
@@ -144,6 +156,8 @@ class ChatStorage:
             }
             if "user_id" not in columns:
                 conn.execute("ALTER TABLE conversations ADD COLUMN user_id INTEGER")
+            if "title" not in columns:
+                conn.execute("ALTER TABLE conversations ADD COLUMN title TEXT")
             user_columns = {
                 row["name"]
                 for row in conn.execute("PRAGMA table_info(users)").fetchall()
@@ -207,6 +221,7 @@ class ChatStorage:
         query = """
             SELECT
                 c.id AS conversation_id,
+                c.title AS title,
                 c.created_at AS created_at,
                 (
                     SELECT MAX(m2.created_at)
@@ -233,6 +248,7 @@ class ChatStorage:
                 items.append(
                     {
                         "conversation_id": row["conversation_id"],
+                        "title": row["title"],
                         "created_at": row["created_at"],
                         "last_message_at": row["last_message_at"],
                         "preview": preview,
@@ -699,3 +715,42 @@ class ChatStorage:
             "active_users_last_24h": int(active_last_24h or 0),
             "plans": plans,
         }
+
+    def set_conversation_title(self, conversation_id: str, title: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE conversations SET title = ? WHERE id = ?",
+                ((title or "")[:80], conversation_id),
+            )
+
+    def add_user_knowledge_file(self, user_id: int, filename: str, content: str) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "INSERT INTO user_knowledge_files (user_id, filename, content) VALUES (?, ?, ?)",
+                (user_id, filename, content),
+            )
+            return int(cursor.lastrowid)
+
+    def list_user_knowledge_files(self, user_id: int) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, filename, created_at FROM user_knowledge_files WHERE user_id = ? ORDER BY id DESC LIMIT 20",
+                (user_id,),
+            ).fetchall()
+        return [{"id": row["id"], "filename": row["filename"], "created_at": row["created_at"]} for row in rows]
+
+    def get_user_knowledge_content(self, user_id: int) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, filename, content FROM user_knowledge_files WHERE user_id = ? ORDER BY id DESC LIMIT 10",
+                (user_id,),
+            ).fetchall()
+        return [{"id": row["id"], "filename": row["filename"], "content": row["content"]} for row in rows]
+
+    def delete_user_knowledge_file(self, file_id: int, user_id: int) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM user_knowledge_files WHERE id = ? AND user_id = ?",
+                (file_id, user_id),
+            )
+            return cur.rowcount > 0
