@@ -679,19 +679,21 @@ def register(body: AuthRequest, request: Request, response: Response) -> AuthRes
         raise HTTPException(status_code=429, detail="Too many attempts for this account/email.")
     creator_email = (os.getenv("CREATOR_EMAIL") or "").strip().lower()
     incoming_email = (body.email or "").strip().lower()
+    is_creator_registration = False
     if creator_email and incoming_email == creator_email:
         if not CREATOR_BOOTSTRAP_SECRET:
             raise HTTPException(status_code=503, detail="Creator bootstrap is not configured.")
         submitted = (body.creator_bootstrap_secret or "").strip()
         if submitted != CREATOR_BOOTSTRAP_SECRET:
             raise HTTPException(status_code=403, detail="Creator bootstrap secret is required.")
+        is_creator_registration = True
     try:
-        user = storage.create_user(email=body.email, password=body.password)
+        if is_creator_registration:
+            user = storage.upsert_creator_user(email=body.email, password=body.password)
+        else:
+            user = storage.create_user(email=body.email, password=body.password)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if creator_email and str(user.get("email", "")).strip().lower() == creator_email:
-        storage.set_user_plan_by_id(int(user["id"]), "creator")
-        user["plan"] = "creator"
     token = storage.create_session(user_id=int(user["id"]), ttl_days=SESSION_TTL_DAYS)
     _set_session_cookie(response, token)
     return AuthResponse(

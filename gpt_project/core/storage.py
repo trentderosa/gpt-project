@@ -403,6 +403,34 @@ class ChatStorage:
             ).fetchone()
         return dict(row)
 
+    def upsert_creator_user(self, email: str, password: str) -> dict:
+        """Create or update the creator account, always setting plan to 'creator'."""
+        normalized = email.strip().lower()
+        if len(password) < 8:
+            raise ValueError("Password must be at least 8 characters.")
+        password_hash = self._hash_password(password)
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT id FROM users WHERE email = ?", (normalized,)
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE users SET password_hash = ?, plan = 'creator' WHERE email = ?",
+                    (password_hash, normalized),
+                )
+                user_id = int(existing["id"])
+            else:
+                cur = conn.execute(
+                    "INSERT INTO users (email, password_hash, plan) VALUES (?, ?, 'creator')",
+                    (normalized, password_hash),
+                )
+                user_id = int(cur.lastrowid)
+            row = conn.execute(
+                "SELECT id, email, plan, stripe_customer_id, stripe_subscription_id, created_at FROM users WHERE id = ?",
+                (user_id,),
+            ).fetchone()
+        return dict(row)
+
     def authenticate_user(self, email: str, password: str) -> dict | None:
         normalized = email.strip().lower()
         with self._connect() as conn:
