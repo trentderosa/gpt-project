@@ -17,12 +17,13 @@ class LLMWrapper:
         self.client = OpenAI(api_key=api_key, timeout=45.0, max_retries=2)
         self.model = model
 
-    def chat(self, messages: list[dict], temperature: float = 0.2, max_tokens: int = 1500) -> str:
+    def chat(self, messages: list[dict], temperature: float = 0.2, max_tokens: int = 2048, model: str | None = None) -> str:
         last_error = None
+        active_model = model or self.model
         for attempt in range(3):
             try:
                 response = self.client.chat.completions.create(
-                    model=self.model,
+                    model=active_model,
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
@@ -42,11 +43,11 @@ class LLMWrapper:
             raise last_error
         return "I couldn't generate a response."
 
-
-    def chat_stream(self, messages: list[dict], temperature: float = 0.2, max_tokens: int = 1500) -> Generator[str, None, None]:
+    def chat_stream(self, messages: list[dict], temperature: float = 0.2, max_tokens: int = 2048, model: str | None = None) -> Generator[str, None, None]:
         """Yield content tokens from the OpenAI streaming API."""
+        active_model = model or self.model
         stream = self.client.chat.completions.create(
-            model=self.model,
+            model=active_model,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -89,7 +90,7 @@ class LLMWrapper:
                 }
             ],
             temperature=0.2,
-            max_tokens=400,
+            max_tokens=600,
         )
         content = (response.choices[0].message.content or "").strip()
         return content or "Image uploaded. No detailed analysis was produced."

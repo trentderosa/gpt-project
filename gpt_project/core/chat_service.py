@@ -291,7 +291,7 @@ class ChatService:
                     return merged
         return merged
 
-    def _trim_history(self, history: list[dict], max_messages: int = 8, max_chars: int = 5000) -> list[dict]:
+    def _trim_history(self, history: list[dict], max_messages: int = 16, max_chars: int = 12000) -> list[dict]:
         trimmed = history[-max_messages:]
         total_chars = sum(len(msg.get("content", "")) for msg in trimmed)
         while trimmed and total_chars > max_chars:
@@ -866,6 +866,7 @@ class ChatService:
         user_location_label: str | None = None,
         user_profile: dict | None = None,
         uploaded_file_context: str | None = None,
+        model: str | None = None,
     ) -> tuple[str, list[tuple[float, str, str]], list[dict], dict]:
         normalized_question = question.strip().lower()
         if normalized_question in ACK_MESSAGES:
@@ -955,7 +956,7 @@ class ChatService:
             }
         )
 
-        answer = self.llm.chat(messages=messages)
+        answer = self.llm.chat(messages=messages, model=model)
         if self._looks_like_notes_refusal(answer):
             fallback_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
             fallback_messages.extend(self._trim_history(effective_history))
@@ -975,7 +976,7 @@ class ChatService:
                     ),
                 }
             )
-            answer = self.llm.chat(messages=fallback_messages)
+            answer = self.llm.chat(messages=fallback_messages, model=model)
 
         if self._is_current_events_query(question) and self._looks_stale_current_answer(answer):
             has_live_signal = bool(web_results) or bool(market_context.strip()) or bool(news_context.strip()) or bool(
@@ -999,7 +1000,7 @@ class ChatService:
                             ),
                         }
                     )
-                    answer = self.llm.chat(messages=stale_fix_messages)
+                    answer = self.llm.chat(messages=stale_fix_messages, model=model)
             else:
                 stale_fix_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
                 stale_fix_messages.extend(self._trim_history(effective_history))
@@ -1018,7 +1019,7 @@ class ChatService:
                         ),
                     }
                 )
-                answer = self.llm.chat(messages=stale_fix_messages)
+                answer = self.llm.chat(messages=stale_fix_messages, model=model)
 
         if self._needs_market_context(question):
             forced = self._market_answer_fallback(market_context=market_context, web_results=web_results)
@@ -1034,7 +1035,8 @@ class ChatService:
 
     def ask_stream(self, question, history=None, use_web_search=True,
                    user_timezone=None, user_utc_offset_minutes=None,
-                   user_location_label=None, user_profile=None, uploaded_file_context=None):
+                   user_location_label=None, user_profile=None, uploaded_file_context=None,
+                   model=None):
         normalized_question = question.strip().lower()
         if normalized_question in ACK_MESSAGES:
             short_reply = "Okay."
@@ -1071,18 +1073,18 @@ class ChatService:
         messages.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+profile_ctx+(uploaded_file_context or "")+note_blk+anti_r+anti_s+"User question:\n"+question+web_ctx})
         streamed = []
         try:
-            for token in self.llm.chat_stream(messages=messages):
+            for token in self.llm.chat_stream(messages=messages, model=model):
                 streamed.append(token)
                 yield ("token", token)
             answer = "".join(streamed).strip() or "I could not generate a full answer. Please try again."
         except Exception:
-            answer = self.llm.chat(messages=messages)
+            answer = self.llm.chat(messages=messages, model=model)
             yield ("replace", answer)
         if self._looks_like_notes_refusal(answer):
             fbk = [{"role": "system", "content": SYSTEM_PROMPT}]
             fbk.extend(self._trim_history(eff_h))
             fbk.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+profile_ctx+(uploaded_file_context or "")+"Question: "+question+"\n\nGive a direct answer using general knowledge. If uncertain, state uncertainty briefly, then still provide your best useful answer."})
-            answer = self.llm.chat(messages=fbk)
+            answer = self.llm.chat(messages=fbk, model=model)
             yield ("replace", answer)
         if self._is_current_events_query(question) and self._looks_stale_current_answer(answer):
             if not live:
@@ -1092,13 +1094,13 @@ class ChatService:
                     sf = [{"role": "system", "content": SYSTEM_PROMPT}]
                     sf.extend(self._trim_history(eff_h))
                     sf.append({"role": "user", "content": runtime_ctx+profile_ctx+"Question: "+question+"\n\nGive a useful best-effort answer without claiming live retrieval is unavailable. Be explicit about uncertainty, but still answer directly."})
-                    answer = self.llm.chat(messages=sf)
+                    answer = self.llm.chat(messages=sf, model=model)
                 yield ("replace", answer)
             else:
                 sf = [{"role": "system", "content": SYSTEM_PROMPT}]
                 sf.extend(self._trim_history(eff_h))
                 sf.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+profile_ctx+"Question: "+question+"\n\nRewrite your answer using available live context only. Do not mention training cutoff dates."})
-                answer = self.llm.chat(messages=sf)
+                answer = self.llm.chat(messages=sf, model=model)
                 yield ("replace", answer)
         if self._needs_market_context(question):
             forced = self._market_answer_fallback(market_context=market_ctx, web_results=web_results)

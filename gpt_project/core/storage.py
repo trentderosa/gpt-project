@@ -723,6 +723,21 @@ class ChatStorage:
                 ((title or "")[:80], conversation_id),
             )
 
+    def delete_conversation(self, conversation_id: str, user_id: int | None = None) -> bool:
+        with self._connect() as conn:
+            if user_id is not None:
+                row = conn.execute(
+                    "SELECT user_id FROM conversations WHERE id = ?",
+                    (conversation_id,),
+                ).fetchone()
+                if not row or row["user_id"] != user_id:
+                    return False
+            conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
+            conn.execute("DELETE FROM user_profiles WHERE conversation_id = ?", (conversation_id,))
+            conn.execute("DELETE FROM uploaded_files WHERE conversation_id = ?", (conversation_id,))
+            result = conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+            return result.rowcount > 0
+
     def add_user_knowledge_file(self, user_id: int, filename: str, content: str) -> int:
         with self._connect() as conn:
             cursor = conn.execute(

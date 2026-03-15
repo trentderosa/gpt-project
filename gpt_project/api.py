@@ -276,6 +276,9 @@ class CreateConversationResponse(BaseModel):
     conversation_id: str
 
 
+SUPPORTED_MODELS = {"gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"}
+
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=MAX_MESSAGE_CHARS)
     conversation_id: str | None = None
@@ -283,6 +286,7 @@ class ChatRequest(BaseModel):
     user_timezone: str | None = None
     user_utc_offset_minutes: int | None = None
     user_location_label: str | None = None
+    model: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -1074,6 +1078,20 @@ def get_conversation(conversation_id: str, request: Request) -> ConversationResp
     return ConversationResponse(conversation_id=conversation_id, messages=messages)
 
 
+@app.delete("/conversations/{conversation_id}")
+def delete_conversation(conversation_id: str, request: Request) -> dict:
+    user = _current_user(request)
+    if not storage.conversation_exists(conversation_id):
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    owner = storage.conversation_owner(conversation_id)
+    if owner is not None and (user is None or int(user["id"]) != int(owner)):
+        raise HTTPException(status_code=403, detail="Forbidden.")
+    ok = storage.delete_conversation(conversation_id, user_id=int(user["id"]) if user else None)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Conversation not found or already deleted.")
+    return {"deleted": True, "conversation_id": conversation_id}
+
+
 @app.get("/conversations", response_model=ConversationListResponse)
 def list_conversations(request: Request, limit: int = 30) -> ConversationListResponse:
     user = _current_user(request)
@@ -1106,12 +1124,23 @@ def _generate_title(user_msg: str, assistant_msg: str) -> str:
         return ""
 
 
+@app.get("/models")
+def list_models() -> dict:
+    return {"models": sorted(SUPPORTED_MODELS), "default": DEFAULT_MODEL}
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
     user = _current_user(request)
     client_key = _client_key(request)
     if not chat_rate_limiter.allow(client_key):
         raise HTTPException(status_code=429, detail="Too many chat requests. Please wait a moment.")
+
+    # Validate and resolve model selection.
+    requested_model = (chat_request.model or "").strip()
+    if requested_model and requested_model not in SUPPORTED_MODELS:
+        raise HTTPException(status_code=400, detail=f"Unsupported model '{requested_model}'. Valid options: {sorted(SUPPORTED_MODELS)}")
+    active_model = requested_model or DEFAULT_MODEL
 
     sanitized_message = _sanitize_chat_message(chat_request.message)
     if not sanitized_message:
@@ -1210,6 +1239,7 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
             user_location_label=chat_request.user_location_label,
             user_profile=merged_profile,
             uploaded_file_context=uploaded_file_context,
+            model=active_model,
         )
     except AuthenticationError as exc:
         raise HTTPException(status_code=401, detail="Invalid OpenAI API key.") from exc
@@ -1258,6 +1288,10 @@ def chat_stream(chat_request: ChatRequest, request: Request):
     client_key = _client_key(request)
     if not chat_rate_limiter.allow(client_key):
         raise HTTPException(status_code=429, detail="Too many chat requests. Please wait a moment.")
+    requested_model = (chat_request.model or "").strip()
+    if requested_model and requested_model not in SUPPORTED_MODELS:
+        raise HTTPException(status_code=400, detail=f"Unsupported model '{requested_model}'.")
+    active_model = requested_model or DEFAULT_MODEL
     sanitized_message = _sanitize_chat_message(chat_request.message)
     if not sanitized_message:
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
@@ -1325,6 +1359,7 @@ def chat_stream(chat_request: ChatRequest, request: Request):
                 user_location_label=chat_request.user_location_label,
                 user_profile=merged_profile,
                 uploaded_file_context=uploaded_file_context,
+                model=active_model,
             ):
                 if event_type == "token":
                     yield f"event: token\ndata: {json.dumps({'token': event_data})}\n\n"
@@ -1361,24 +1396,6 @@ def chat_stream(chat_request: ChatRequest, request: Request):
             "generated_images": [],
         }
         yield f"event: done\ndata: {json.dumps(payload)}\n\n"
-    return StreamingResponse(event_gen(), media_type="text/event-stream")
-
-def chat_stream(chat_request: ChatRequest, request: Request):
-    result = chat(chat_request, request)
-
-    def event_gen():
-        yield f"event: meta\ndata: {json.dumps({'conversation_id': result.conversation_id})}\n\n"
-        for token in _stream_text_tokens(result.answer):
-            yield f"event: token\ndata: {json.dumps({'token': token})}\n\n"
-        payload = {
-            "conversation_id": result.conversation_id,
-            "answer": result.answer,
-            "retrieved_sources": result.retrieved_sources,
-            "web_results": result.web_results,
-            "generated_images": result.generated_images,
-        }
-        yield f"event: done\ndata: {json.dumps(payload)}\n\n"
-
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 
