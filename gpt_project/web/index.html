@@ -647,7 +647,7 @@
       <div class="auth-box">
         <input id="authEmail" type="email" placeholder="Email" autocomplete="username">
         <input id="authPassword" type="password" placeholder="Password" autocomplete="current-password">
-        <input id="creatorSecret" type="password" placeholder="Creator secret (registration only)" autocomplete="off" style="font-size:0.8em;opacity:0.7;">
+        <input id="creatorSecret" type="password" placeholder="Creator secret" autocomplete="off" style="font-size:0.8em;opacity:0.7;display:none;">
         <div class="auth-actions">
           <button id="continueAuthBtn" type="button">Login</button>
           <button id="registerAuthBtn" type="button">Register</button>
@@ -742,6 +742,11 @@
     const SIDEBAR_KEY = "cortex_sidebar_hidden";
     const DARK_KEY = "cortex_dark_mode";
     const MODEL_KEY = "cortex_model";
+
+    // Show creator-only fields when ?creator param is present
+    if (new URLSearchParams(location.search).has("creator")) {
+      document.getElementById("creatorSecret").style.display = "";
+    }
     let conversationId = localStorage.getItem(KEY) || null;
     let currentUser = null;
     const MAX_RENDERED_ITEMS = 220;
