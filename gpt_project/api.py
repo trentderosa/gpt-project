@@ -1113,6 +1113,22 @@ def get_live_news(limit: int = 20) -> LiveDataResponse:
     return LiveDataResponse(items=live_store.get_latest("news", limit=limit))
 
 
+def _build_knowledge_context(user_id: int) -> str:
+    """Return a context string combining personal and all workspace knowledge files."""
+    parts: list[str] = []
+    personal = storage.get_user_knowledge_content(user_id)
+    if personal:
+        snippets = ["[" + f["filename"] + "] " + f["content"][:2000] for f in personal[:5]]
+        parts.append("User's personal notes: " + " | ".join(snippets))
+    workspaces = storage.list_user_workspaces(user_id)
+    for ws in workspaces:
+        ws_files = storage.get_workspace_knowledge_content(ws["id"])
+        if ws_files:
+            snippets = ["[" + f["filename"] + "] " + f["content"][:2000] for f in ws_files[:5]]
+            parts.append(f"Workspace '{ws['name']}' shared notes: " + " | ".join(snippets))
+    return "\n\n".join(parts)
+
+
 def _generate_title(user_msg: str, assistant_msg: str) -> str:
     try:
         msgs = [
@@ -1179,10 +1195,8 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
     uploaded_files = storage.get_uploaded_files(conversation_id, limit=12)
     uploaded_file_context = _build_uploaded_file_context(uploaded_files)
     if user:
-        _uk = storage.get_user_knowledge_content(int(user["id"]))
-        if _uk:
-            _kparts = ["[" + f["filename"] + "]" + " " + f["content"][:2000] for f in _uk[:5]]
-            _kctx = "User's personal notes:" + " | ".join(_kparts)
+        _kctx = _build_knowledge_context(int(user["id"]))
+        if _kctx:
             uploaded_file_context = (uploaded_file_context or "") + "\n\n" + _kctx
     raw_message = sanitized_message
     image_prompt = _extract_image_prompt(raw_message)
@@ -1326,10 +1340,8 @@ def chat_stream(chat_request: ChatRequest, request: Request):
     uploaded_files = storage.get_uploaded_files(conversation_id, limit=12)
     uploaded_file_context = _build_uploaded_file_context(uploaded_files)
     if user:
-        _uk = storage.get_user_knowledge_content(int(user["id"]))
-        if _uk:
-            _kparts = ["[" + f["filename"] + "]" + " " + f["content"][:2000] for f in _uk[:5]]
-            _kctx = "User's personal notes:" + " | ".join(_kparts)
+        _kctx = _build_knowledge_context(int(user["id"]))
+        if _kctx:
             uploaded_file_context = (uploaded_file_context or "") + "\n\n" + _kctx
     image_prompt = _extract_image_prompt(sanitized_message)
     if image_prompt is not None:
@@ -1402,7 +1414,11 @@ def chat_stream(chat_request: ChatRequest, request: Request):
 
 
 @app.post("/knowledge")
-async def upload_knowledge(request: Request, file: UploadFile = File(...)) -> dict:
+async def upload_knowledge(
+    request: Request,
+    file: UploadFile = File(...),
+    workspace_id: str | None = Form(None),
+) -> dict:
     user = _current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Login required to upload personal notes.")
@@ -1411,9 +1427,23 @@ async def upload_knowledge(request: Request, file: UploadFile = File(...)) -> di
     payload = await file.read()
     if not payload:
         raise HTTPException(status_code=400, detail="File is empty.")
+    # Validate workspace membership if a workspace is specified.
+    resolved_workspace_id: str | None = None
+    if workspace_id:
+        ws = storage.get_workspace(workspace_id)
+        if not ws:
+            raise HTTPException(status_code=404, detail="Workspace not found.")
+        if not storage.get_workspace_member(workspace_id, int(user["id"])):
+            raise HTTPException(status_code=403, detail="You are not a member of that workspace.")
+        resolved_workspace_id = workspace_id
     extracted = _extract_uploaded_content(file, payload)
-    file_id = storage.add_user_knowledge_file(int(user["id"]), _safe_filename(file.filename), extracted)
-    return {"id": file_id, "filename": _safe_filename(file.filename)}
+    file_id = storage.add_user_knowledge_file(
+        int(user["id"]),
+        _safe_filename(file.filename),
+        extracted,
+        workspace_id=resolved_workspace_id,
+    )
+    return {"id": file_id, "filename": _safe_filename(file.filename), "workspace_id": resolved_workspace_id}
 
 
 @app.get("/knowledge")
@@ -1434,3 +1464,76 @@ def delete_knowledge(file_id: int, request: Request) -> dict:
     if not ok:
         raise HTTPException(status_code=404, detail="File not found.")
     return {"deleted": True}
+
+
+# ---------------------------------------------------------------------------
+# Workspaces
+# ---------------------------------------------------------------------------
+
+class CreateWorkspaceRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=80)
+
+
+class InviteToWorkspaceRequest(BaseModel):
+    email: str
+
+
+@app.post("/workspaces")
+def create_workspace(body: CreateWorkspaceRequest, request: Request) -> dict:
+    user = _current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required.")
+    workspace = storage.create_workspace(
+        name=body.name.strip(),
+        owner_user_id=int(user["id"]),
+    )
+    return workspace
+
+
+@app.get("/workspaces")
+def list_workspaces(request: Request) -> dict:
+    user = _current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required.")
+    workspaces = storage.list_user_workspaces(int(user["id"]))
+    return {"workspaces": workspaces}
+
+
+@app.get("/workspaces/{workspace_id}/knowledge")
+def list_workspace_knowledge(workspace_id: str, request: Request) -> dict:
+    user = _current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required.")
+    workspace = storage.get_workspace(workspace_id)
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found.")
+    if not storage.get_workspace_member(workspace_id, int(user["id"])):
+        raise HTTPException(status_code=403, detail="You are not a member of this workspace.")
+    files = storage.list_workspace_knowledge_files(workspace_id)
+    return {"files": files}
+
+
+@app.post("/workspaces/{workspace_id}/invite")
+def invite_to_workspace(workspace_id: str, body: InviteToWorkspaceRequest, request: Request) -> dict:
+    user = _current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required.")
+
+    workspace = storage.get_workspace(workspace_id)
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found.")
+
+    # Only owners and members of the workspace can invite
+    membership = storage.get_workspace_member(workspace_id, int(user["id"]))
+    if not membership:
+        raise HTTPException(status_code=403, detail="You are not a member of this workspace.")
+
+    invitee = storage.get_user_by_email(body.email)
+    if not invitee:
+        raise HTTPException(status_code=404, detail="No account found for that email address.")
+
+    added = storage.add_workspace_member(workspace_id, int(invitee["id"]), role="member")
+    if not added:
+        raise HTTPException(status_code=409, detail="User is already a member of this workspace.")
+
+    return {"invited": True, "user_id": invitee["id"], "email": invitee["email"]}

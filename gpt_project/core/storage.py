@@ -150,6 +150,39 @@ class ChatStorage:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS workspaces (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    owner_user_id INTEGER NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(owner_user_id) REFERENCES users(id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS workspace_members (
+                    workspace_id TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'member',
+                    joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (workspace_id, user_id),
+                    FOREIGN KEY(workspace_id) REFERENCES workspaces(id),
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                )
+                """
+            )
+            # Additive migration: add workspace_id to user_knowledge_files (NULL = personal file)
+            knowledge_columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(user_knowledge_files)").fetchall()
+            }
+            if "workspace_id" not in knowledge_columns:
+                conn.execute(
+                    "ALTER TABLE user_knowledge_files ADD COLUMN workspace_id TEXT REFERENCES workspaces(id)"
+                )
             columns = {
                 row["name"]
                 for row in conn.execute("PRAGMA table_info(conversations)").fetchall()
@@ -766,11 +799,17 @@ class ChatStorage:
             result = conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
             return result.rowcount > 0
 
-    def add_user_knowledge_file(self, user_id: int, filename: str, content: str) -> int:
+    def add_user_knowledge_file(
+        self,
+        user_id: int,
+        filename: str,
+        content: str,
+        workspace_id: str | None = None,
+    ) -> int:
         with self._connect() as conn:
             cursor = conn.execute(
-                "INSERT INTO user_knowledge_files (user_id, filename, content) VALUES (?, ?, ?)",
-                (user_id, filename, content),
+                "INSERT INTO user_knowledge_files (user_id, filename, content, workspace_id) VALUES (?, ?, ?, ?)",
+                (user_id, filename, content, workspace_id),
             )
             return int(cursor.lastrowid)
 
@@ -797,3 +836,108 @@ class ChatStorage:
                 (file_id, user_id),
             )
             return cur.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # Workspaces
+    # ------------------------------------------------------------------
+
+    def get_user_by_email(self, email: str) -> dict | None:
+        normalized = (email or "").strip().lower()
+        if not normalized:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id, email, plan, created_at FROM users WHERE email = ?",
+                (normalized,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def create_workspace(self, name: str, owner_user_id: int) -> dict:
+        workspace_id = str(uuid.uuid4())
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO workspaces (id, name, owner_user_id) VALUES (?, ?, ?)",
+                (workspace_id, (name or "").strip(), owner_user_id),
+            )
+            conn.execute(
+                "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'owner')",
+                (workspace_id, owner_user_id),
+            )
+            row = conn.execute(
+                "SELECT id, name, owner_user_id, created_at FROM workspaces WHERE id = ?",
+                (workspace_id,),
+            ).fetchone()
+        return dict(row)
+
+    def get_workspace(self, workspace_id: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id, name, owner_user_id, created_at FROM workspaces WHERE id = ?",
+                (workspace_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_user_workspaces(self, user_id: int) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT w.id, w.name, w.owner_user_id, w.created_at, wm.role
+                FROM workspaces w
+                JOIN workspace_members wm ON wm.workspace_id = w.id
+                WHERE wm.user_id = ?
+                ORDER BY w.created_at DESC
+                """,
+                (user_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_workspace_member(self, workspace_id: str, user_id: int) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT workspace_id, user_id, role, joined_at FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
+                (workspace_id, user_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def add_workspace_member(self, workspace_id: str, user_id: int, role: str = "member") -> bool:
+        """Add a member; returns False if already a member."""
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
+                (workspace_id, user_id),
+            ).fetchone()
+            if existing:
+                return False
+            conn.execute(
+                "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)",
+                (workspace_id, user_id, role),
+            )
+        return True
+
+    def list_workspace_knowledge_files(self, workspace_id: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT f.id, f.filename, f.user_id, f.created_at
+                FROM user_knowledge_files f
+                WHERE f.workspace_id = ?
+                ORDER BY f.id DESC
+                LIMIT 50
+                """,
+                (workspace_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_workspace_knowledge_content(self, workspace_id: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, filename, content
+                FROM user_knowledge_files
+                WHERE workspace_id = ?
+                ORDER BY id DESC
+                LIMIT 10
+                """,
+                (workspace_id,),
+            ).fetchall()
+        return [{"id": row["id"], "filename": row["filename"], "content": row["content"]} for row in rows]

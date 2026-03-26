@@ -569,6 +569,15 @@
     .knowledge-item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .knowledge-del-btn { border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 14px; padding: 0 2px; line-height: 1; }
     .knowledge-del-btn:hover { color: var(--error); }
+    .workspace-section { margin-top: 6px; }
+    .workspace-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; background: #fff; cursor: pointer; }
+    .workspace-item:hover { background: var(--hover); }
+    .workspace-item.active { border-color: var(--accent); background: var(--accent-pale, #e8f0fe); font-weight: 700; }
+    .workspace-item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .workspace-panel { margin-top: 6px; border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+    .workspace-panel-name { font-size: 12px; font-weight: 700; margin-bottom: 6px; color: var(--ink); }
+    .workspace-input { font-size: 11px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); flex: 1; min-width: 0; }
+    .workspace-row { display: flex; gap: 4px; margin-top: 4px; }
     .dark-toggle {
       border: 1px solid var(--line);
       background: var(--bot);
@@ -674,6 +683,25 @@
         <input id="noteFileInput" type="file" style="display:none" accept=".txt,.md,.pdf,.docx">
         <ul id="notesList" class="knowledge-list"></ul>
       </div>
+      <div id="workspaceSection" class="workspace-section" style="display:none;">
+        <div class="knowledge-title">Workspaces</div>
+        <ul id="workspaceList" class="knowledge-list"></ul>
+        <div class="workspace-row">
+          <input id="newWorkspaceName" class="workspace-input" type="text" placeholder="New workspace name" maxlength="80">
+          <button id="createWorkspaceBtn" class="auth-secondary" type="button">+ Create</button>
+        </div>
+        <div id="activeWorkspacePanel" class="workspace-panel" style="display:none;">
+          <div id="activeWorkspaceName" class="workspace-panel-name"></div>
+          <div class="workspace-row">
+            <input id="inviteEmail" class="workspace-input" type="email" placeholder="Invite by email">
+            <button id="inviteBtn" class="auth-secondary" type="button">Invite</button>
+          </div>
+          <div class="knowledge-title" style="margin-top:8px;">Shared Files</div>
+          <ul id="workspaceFilesList" class="knowledge-list"></ul>
+          <button id="uploadWorkspaceNoteBtn" class="auth-secondary" type="button" style="margin-top:4px;">+ Upload to Workspace</button>
+          <input id="workspaceNoteFileInput" type="file" style="display:none" accept=".txt,.md,.pdf,.docx">
+        </div>
+      </div>
       <div class="legal-links">
         <a href="/privacy" target="_blank" rel="noopener">Privacy</a>
         <a href="/terms" target="_blank" rel="noopener">Terms</a>
@@ -761,6 +789,18 @@
     const uploadNoteBtnEl = document.getElementById("uploadNoteBtn");
     const noteFileInputEl = document.getElementById("noteFileInput");
     const notesListEl = document.getElementById("notesList");
+    const workspaceSectionEl = document.getElementById("workspaceSection");
+    const workspaceListEl = document.getElementById("workspaceList");
+    const newWorkspaceNameEl = document.getElementById("newWorkspaceName");
+    const createWorkspaceBtnEl = document.getElementById("createWorkspaceBtn");
+    const activeWorkspacePanelEl = document.getElementById("activeWorkspacePanel");
+    const activeWorkspaceNameEl = document.getElementById("activeWorkspaceName");
+    const inviteEmailEl = document.getElementById("inviteEmail");
+    const inviteBtnEl = document.getElementById("inviteBtn");
+    const workspaceFilesListEl = document.getElementById("workspaceFilesList");
+    const uploadWorkspaceNoteBtnEl = document.getElementById("uploadWorkspaceNoteBtn");
+    const workspaceNoteFileInputEl = document.getElementById("workspaceNoteFileInput");
+    let activeWorkspace = null;
     let lastUserMessage = null;
     let lastBotBubble = null;
 
@@ -866,9 +906,12 @@
       logoutBtnEl.style.display = loggedIn ? "" : "none";
       planActionsEl.style.display = loggedIn ? "" : "none";
       knowledgeSectionEl.style.display = loggedIn ? "" : "none";
+      workspaceSectionEl.style.display = loggedIn ? "" : "none";
       if (!loggedIn) {
         authStatusEl.textContent = "Not logged in. Free mode may be limited.";
         if (notesListEl) notesListEl.innerHTML = "";
+        activeWorkspace = null;
+        activeWorkspacePanelEl.style.display = "none";
       }
     }
 
@@ -1446,6 +1489,7 @@
           else { conversationId = null; localStorage.removeItem(KEY); }
         } else { conversationId = null; localStorage.removeItem(KEY); }
         await refreshNotes();
+        await refreshWorkspaces();
         await refreshConversationList();
       } catch (err) {
         addBubble("Error: " + err.message, "bot", "error");
@@ -1617,10 +1661,94 @@
       noteFileInputEl.value = "";
     });
 
+    async function refreshWorkspaces() {
+      if (!currentUser || !workspaceListEl) return;
+      try {
+        const res = await apiFetch("/workspaces");
+        if (!res.ok) return;
+        const data = await res.json();
+        workspaceListEl.innerHTML = "";
+        for (const ws of data.workspaces || []) {
+          const li = document.createElement("li");
+          li.className = "workspace-item" + (activeWorkspace && activeWorkspace.id === ws.id ? " active" : "");
+          li.innerHTML = `<span class="workspace-item-name" title="${escapeHtml(ws.name)}">${escapeHtml(ws.name)}</span><span style="font-size:10px;color:var(--muted);">${escapeHtml(ws.role)}</span>`;
+          li.addEventListener("click", () => setActiveWorkspace(ws));
+          workspaceListEl.appendChild(li);
+        }
+      } catch (_) {}
+    }
+
+    async function setActiveWorkspace(ws) {
+      activeWorkspace = ws;
+      activeWorkspaceNameEl.textContent = ws.name;
+      activeWorkspacePanelEl.style.display = "";
+      await refreshWorkspaceFiles();
+      await refreshWorkspaces();
+    }
+
+    async function refreshWorkspaceFiles() {
+      if (!activeWorkspace || !workspaceFilesListEl) return;
+      try {
+        const res = await apiFetch("/workspaces/" + activeWorkspace.id + "/knowledge");
+        if (!res.ok) return;
+        const data = await res.json();
+        workspaceFilesListEl.innerHTML = "";
+        if (!(data.files || []).length) {
+          workspaceFilesListEl.innerHTML = "<li style='font-size:11px;color:var(--muted);padding:4px 0;'>No files yet.</li>";
+          return;
+        }
+        for (const f of data.files) {
+          const li = document.createElement("li");
+          li.className = "knowledge-item";
+          li.innerHTML = `<span class="knowledge-item-name" title="${escapeHtml(f.filename)}">${escapeHtml(f.filename)}</span>`;
+          workspaceFilesListEl.appendChild(li);
+        }
+      } catch (_) {}
+    }
+
+    createWorkspaceBtnEl.addEventListener("click", async () => {
+      const name = (newWorkspaceNameEl.value || "").trim();
+      if (!name) return;
+      try {
+        const res = await apiFetch("/workspaces", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+        if (!res.ok) { const d = await res.json(); addBubble("Error: " + (d.detail || "Could not create workspace"), "bot", "error"); return; }
+        newWorkspaceNameEl.value = "";
+        await refreshWorkspaces();
+      } catch (err) { addBubble("Error: " + err.message, "bot", "error"); }
+    });
+
+    inviteBtnEl.addEventListener("click", async () => {
+      if (!activeWorkspace) return;
+      const email = (inviteEmailEl.value || "").trim();
+      if (!email) return;
+      try {
+        const res = await apiFetch("/workspaces/" + activeWorkspace.id + "/invite", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email }) });
+        const d = await res.json();
+        if (!res.ok) { addBubble("Invite failed: " + (d.detail || "Unknown error"), "bot", "error"); return; }
+        addBubble("Invited " + d.email + " to " + activeWorkspace.name + ".", "bot");
+        inviteEmailEl.value = "";
+      } catch (err) { addBubble("Error: " + err.message, "bot", "error"); }
+    });
+
+    uploadWorkspaceNoteBtnEl.addEventListener("click", () => workspaceNoteFileInputEl.click());
+    workspaceNoteFileInputEl.addEventListener("change", async () => {
+      const file = workspaceNoteFileInputEl.files?.[0];
+      if (!file || !activeWorkspace) return;
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("workspace_id", activeWorkspace.id);
+      try {
+        const res = await apiFetch("/knowledge", { method: "POST", body: fd });
+        if (!res.ok) { const d = await res.json(); addBubble("Upload failed: " + (d.detail || "Unknown error"), "bot", "error"); return; }
+        await refreshWorkspaceFiles();
+      } catch (err) { addBubble("Upload error: " + err.message, "bot", "error"); }
+      workspaceNoteFileInputEl.value = "";
+    });
+
     initLocationHint();
     applySidebarState();
     applyDarkMode();
-    Promise.all([refreshMe(), loadConversation(), refreshConversationList(), refreshNotes()]).finally(() => {
+    Promise.all([refreshMe(), loadConversation(), refreshConversationList(), refreshNotes(), refreshWorkspaces()]).finally(() => {
       renderAttachmentTray();
       if (!chatEl.children.length) {
         addMeta("Cortex Engine by Trent DeRosa — ask anything, attach files, or pick a starter prompt below.");
