@@ -8,7 +8,7 @@ import requests
 import csv
 from io import StringIO
 
-from .config import MIN_SCORE, TOP_K
+from .config import ALWAYS_WEB_SEARCH, MIN_SCORE, TOP_K
 from .live_data_store import LiveDataStore
 from .llm_wrapper import LLMWrapper
 from .retriever import retrieve_context
@@ -22,18 +22,42 @@ Use a direct, candid tone. Do not force uplifting language.
 Use correct punctuation, spelling, and capitalization in your responses.
 You can mirror the user's tone, but do not mirror punctuation or grammar mistakes.
 Use local note context first when relevant.
-If web results are provided, use them and cite relevant URLs.
+
+LIVE WEB RESULTS — PRIMARY SOURCE OF TRUTH:
+When web results are provided, they are the authoritative source for factual claims.
+Base your answer on those results. Do not contradict or silently ignore web results in favor of training memory.
+Cite the most relevant source URLs inline when they directly support a claim.
+For any time-sensitive topic — current events, news, prices, sports scores, politics, company details,
+software versions, laws, regulations, product info, rankings, schedules, or anything about living people —
+rely exclusively on the provided web results. Do not fill gaps from training memory.
+If web results are provided but do not clearly answer the question, say so explicitly.
+If no web results are available and the question is time-sensitive, state clearly that current
+information could not be verified, then give your best-effort answer with explicit uncertainty labeling.
+Never present stale training data as current fact. Never say 'as of my last update' or reference
+a past cutoff year as if it is reliable current information.
+
 If runtime date/time context is provided, use it for questions about today's date, day, or time.
-If local notes and web results do not cover a question, use your general model knowledge and be clear when uncertain.
+If local notes and web results do not cover a question, use general knowledge and be clear when uncertain.
 Never answer with only 'I don't know based on my notes'.
-For questions about latest/current/live information, do not give outdated cutoff-style answers (for example 'as of 2023').
-If live data retrieval fails, still provide a useful best-effort answer and clearly label uncertainty.
-Always attempt live/web retrieval before answering.
 When the user asks for code, respond with a clean markdown code block using the correct language tag and proper indentation.
 For simple code requests, keep explanation brief and prioritize readable code/output formatting.
 Prefer clear markdown structure when useful: short headings, bullet points, numbered steps, and code fences.
 Do not wrap every answer in markdown; choose plain text for short/simple replies.
 Use the user profile context to remember the user's name, facts they shared, and mirror their writing style."""
+
+# Regex that identifies queries where live web search adds no value: creative writing,
+# translation, rewriting user-supplied text, pure math, and basic small talk.
+_WEB_EXEMPT_RE = re.compile(
+    r"^(hi|hello|hey|howdy|sup|yo|good morning|good afternoon|good evening|good night|what's up|whats up)\b"
+    r"|\bhow are you\b"
+    r"|\bwho (are|r) you\b"
+    r"|\bwhat is your name\b"
+    r"|\b(write|compose|create|generate)\s+(me\s+)?(a\s+|an\s+)?(poem|haiku|sonnet|song|lyrics|story|short story|limerick|fable|fiction|novel|essay|paragraph|narrative|monologue|dialogue|screenplay)\b"
+    r"|\b(rewrite|rephrase|improve|fix|edit|proofread|revise|polish|paraphrase|simplify|expand|shorten)\s+(this|the|my|the following|the text|the paragraph|the sentence|below)\b"
+    r"|\btranslate\b"
+    r"|\bin (french|spanish|german|italian|portuguese|chinese|japanese|korean|arabic|russian|hindi|dutch|swedish|norwegian|danish|turkish|polish|greek)\b",
+    re.IGNORECASE,
+)
 
 TIME_QUERY_HINTS = {
     "what day",
@@ -219,6 +243,19 @@ class ChatService:
     def _is_current_events_query(self, question: str) -> bool:
         q = question.lower()
         return any(hint in q for hint in CURRENT_QUERY_HINTS)
+
+    def _is_web_search_exempt(self, question: str) -> bool:
+        """Return True for queries where live web search adds no value:
+        creative writing, translation, rewriting user text, pure math, small talk."""
+        q = question.strip()
+        if not q:
+            return True
+        if q.lower() in ACK_MESSAGES:
+            return True
+        # Pure arithmetic / math expression
+        if re.match(r"^[\d\s\+\-\*\/\^\(\)\.\%=,]+$", q):
+            return True
+        return bool(_WEB_EXEMPT_RE.search(q))
 
     def _web_queries(self, question: str) -> list[str]:
         query = question.strip()
@@ -1050,7 +1087,8 @@ class ChatService:
         hits = retrieve_context(question, self.chunks, top_k=TOP_K)
         has_strong = bool(hits and hits[0][0] >= MIN_SCORE)
         context = ("\n\n".join(f"[source={src} score={sc:.3f}]\n{txt}" for sc, src, txt in hits) if has_strong else "")
-        web_results = self._search_live_web(question, max_results=5) if use_web_search else []
+        _effective_web = use_web_search or (ALWAYS_WEB_SEARCH and not self._is_web_search_exempt(question))
+        web_results = self._search_live_web(question, max_results=5) if _effective_web else []
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         eff_h = history if history is not None else self.history
         updated_profile = self._merge_user_profile(user_profile or {}, question, eff_h)
@@ -1111,4 +1149,4 @@ class ChatService:
         if history is None:
             self.history.append({"role": "user", "content": question})
             self.history.append({"role": "assistant", "content": answer})
-        yield ("done", {"answer": answer, "hits": hits, "web_results": web_results, "updated_profile": updated_profile})
+        yield ("done", {"answer": answer, "hits": hits, "web_results": web_results, "updated_profile": updated_profile, "used_web_search": bool(web_results)})

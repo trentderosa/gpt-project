@@ -674,6 +674,21 @@
       font-family: "Space Grotesk", sans-serif;
     }
     .bubble-copy-btn:hover, .bubble-retry-btn:hover { background: var(--brand-soft); color: var(--ink); }
+    .web-source-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--brand);
+      background: var(--brand-soft);
+      border: 1px solid #c3deff;
+      border-radius: 8px;
+      padding: 3px 8px;
+      font-family: "Space Grotesk", sans-serif;
+      pointer-events: none;
+      user-select: none;
+    }
     .model-badge {
       display: inline-block;
       font-size: 10px;
@@ -1387,6 +1402,12 @@
         }
         const finalAnswer = finalPayload?.answer || builtAnswer || "No response generated.";
         revealBubbleContent(bubble, finalAnswer);
+        if (finalPayload?.used_web_search) {
+          const badge = document.createElement("span");
+          badge.className = "web-source-badge";
+          badge.textContent = "\u{1F310} Live web";
+          bubble.actions.appendChild(badge);
+        }
         if (finalPayload?.generated_images?.length) {
           for (const src of finalPayload.generated_images) {
             addImage(src, "AI generated image");

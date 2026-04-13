@@ -1363,6 +1363,7 @@ def chat_stream(chat_request: ChatRequest, request: Request):
         final_hits = []
         final_web_results = []
         final_profile = {}
+        final_used_web = False
         try:
             for event_type, event_data in chat_service.ask_stream(
                 question=sanitized_message,
@@ -1384,6 +1385,7 @@ def chat_stream(chat_request: ChatRequest, request: Request):
                     final_hits = event_data["hits"]
                     final_web_results = event_data["web_results"]
                     final_profile = event_data["updated_profile"]
+                    final_used_web = event_data.get("used_web_search", False)
         except Exception as exc:
             logger.exception("chat_stream_failure error=%s", str(exc))
             yield f"event: error\ndata: {json.dumps({'detail': 'Temporary server issue. Please try again.'})}\n\n"
@@ -1408,6 +1410,8 @@ def chat_stream(chat_request: ChatRequest, request: Request):
             "retrieved_sources": source_rows,
             "web_results": final_web_results,
             "generated_images": [],
+            "used_web_search": final_used_web,
+            "source_count": len(final_web_results),
         }
         yield f"event: done\ndata: {json.dumps(payload)}\n\n"
     return StreamingResponse(event_gen(), media_type="text/event-stream")
