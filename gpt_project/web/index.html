@@ -89,6 +89,7 @@
       transform: translateY(14px);
       opacity: 0;
       animation: fadeIn 450ms ease forwards;
+      transition: grid-template-columns 0.25s ease;
     }
     .app.sidebar-hidden {
       grid-template-columns: 0 1fr;
@@ -112,6 +113,8 @@
       flex-direction: column;
       gap: 16px;
       background: var(--aside-bg);
+      overflow: hidden;
+      transition: opacity 0.2s ease, padding 0.25s ease;
     }
     .logo {
       font-family: "Space Grotesk", sans-serif;
@@ -466,9 +469,57 @@
       font-family: "Space Grotesk", sans-serif;
     }
     button:disabled { opacity: 0.7; cursor: default; }
+    .sidebar-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(10, 20, 40, 0.45);
+      z-index: 199;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease;
+      display: none;
+    }
+    .sidebar-backdrop.visible {
+      opacity: 1;
+      pointer-events: auto;
+    }
     @media (max-width: 920px) {
-      .app { grid-template-columns: 1fr; height: 100vh; width: 100vw; }
-      aside { border-right: none; border-bottom: 1px solid var(--line); padding: 12px; gap: 8px; }
+      .app {
+        grid-template-columns: 1fr !important;
+        height: 100vh;
+        width: 100vw;
+        transition: none;
+      }
+      .app.sidebar-hidden aside {
+        width: 280px;
+        min-width: unset;
+        padding: 22px 18px;
+        opacity: 1;
+        pointer-events: auto;
+        border-right: 1px solid var(--line);
+      }
+      aside {
+        position: fixed;
+        top: 0;
+        left: 0;
+        height: 100%;
+        width: 280px;
+        max-width: 85vw;
+        z-index: 200;
+        border-right: 1px solid var(--line);
+        border-bottom: none;
+        padding: 22px 18px;
+        gap: 16px;
+        transform: translateX(-100%);
+        transition: transform 0.25s ease;
+        overflow-y: auto;
+        overflow-x: hidden;
+      }
+      aside.mobile-open {
+        transform: translateX(0);
+        box-shadow: 4px 0 24px rgba(10, 20, 40, 0.18);
+      }
+      .sidebar-backdrop { display: block; }
       .logo { font-size: 22px; }
       .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
       #chat { padding-bottom: 18px; }
@@ -634,7 +685,7 @@
 <body>
   <div class="bg-grid"></div>
   <div class="app">
-    <aside>
+    <aside id="sidebar">
       <div class="logo">Cortex Engine</div>
       <div class="tag">Created by Trent DeRosa</div>
       <div class="controls">
@@ -707,6 +758,7 @@
         <a href="/terms" target="_blank" rel="noopener">Terms</a>
       </div>
     </aside>
+    <div id="sidebarBackdrop" class="sidebar-backdrop"></div>
     <main>
       <header>
         <div>
@@ -764,7 +816,10 @@
     const manageBillingBtnEl = document.getElementById("manageBillingBtn");
     const authStatusEl = document.getElementById("authStatus");
     const appEl = document.querySelector(".app");
+    const asideEl = document.getElementById("sidebar");
+    const backdropEl = document.getElementById("sidebarBackdrop");
     const toggleSidebarBtnEl = document.getElementById("toggleSidebarBtn");
+    function isMobile() { return window.innerWidth <= 920; }
     const starterPromptsEl = document.getElementById("starterPrompts");
     const KEY = "trent_gpt_conversation_id";
     const SIDEBAR_KEY = "cortex_sidebar_hidden";
@@ -827,8 +882,17 @@
     });
 
     function applySidebarState() {
-      appEl.classList.toggle("sidebar-hidden", sidebarHidden);
-      toggleSidebarBtnEl.textContent = sidebarHidden ? "Show Sidebar" : "Hide Sidebar";
+      if (isMobile()) {
+        const open = asideEl.classList.contains("mobile-open");
+        backdropEl.classList.toggle("visible", open);
+        toggleSidebarBtnEl.textContent = "☰";
+        appEl.classList.remove("sidebar-hidden");
+      } else {
+        appEl.classList.toggle("sidebar-hidden", sidebarHidden);
+        asideEl.classList.remove("mobile-open");
+        backdropEl.classList.remove("visible");
+        toggleSidebarBtnEl.textContent = sidebarHidden ? "Show Sidebar" : "Hide Sidebar";
+      }
     }
     let thinkingEl = null;
 
@@ -1094,6 +1158,7 @@
       div.appendChild(content);
       const actions = document.createElement("div");
       actions.className = "bubble-actions";
+      actions.style.display = "none";
       const copyBtn = document.createElement("button");
       copyBtn.type = "button"; copyBtn.className = "bubble-copy-btn"; copyBtn.textContent = "Copy";
       copyBtn.addEventListener("click", () => {
@@ -1217,14 +1282,13 @@
           throw new Error(data.detail || "Request failed");
         }
 
-        hideThinking();
         const reader = res.body?.getReader();
         if (!reader) throw new Error("Streaming not supported by browser.");
         const decoder = new TextDecoder("utf-8");
         let buffer = "";
         let builtAnswer = "";
         let finalPayload = null;
-        const bubble = createBotBubble("");
+        let bubble = null;
 
         while (true) {
           const { value, done } = await reader.read();
@@ -1247,14 +1311,19 @@
               conversationId = parsed.conversation_id;
               localStorage.setItem(KEY, conversationId);
             } else if (eventName === "token" && parsed?.token) {
+              if (!bubble) { hideThinking(); bubble = createBotBubble(""); }
               builtAnswer += parsed.token;
               bubble.content.innerHTML = formatMessageText(builtAnswer);
+              bubble.actions.style.display = "";
               chatEl.scrollTop = chatEl.scrollHeight;
             } else if (eventName === "replace" && parsed?.answer) {
+              if (!bubble) { hideThinking(); bubble = createBotBubble(""); }
               builtAnswer = parsed.answer;
               bubble.content.innerHTML = formatMessageText(builtAnswer);
+              bubble.actions.style.display = "";
               chatEl.scrollTop = chatEl.scrollHeight;
             } else if (eventName === "error") {
+              if (!bubble) { hideThinking(); bubble = createBotBubble(""); }
               builtAnswer = parsed?.detail || "An error occurred. Please try again.";
               bubble.content.innerHTML = formatMessageText(builtAnswer);
             } else if (eventName === "done") {
@@ -1268,7 +1337,9 @@
           localStorage.setItem(KEY, conversationId);
         }
         const finalAnswer = finalPayload?.answer || builtAnswer || "No response generated.";
+        if (!bubble) { hideThinking(); bubble = createBotBubble(""); }
         bubble.content.innerHTML = formatMessageText(finalAnswer);
+        bubble.actions.style.display = "";
         if (finalPayload?.generated_images?.length) {
           for (const src of finalPayload.generated_images) {
             addImage(src, "AI generated image");
@@ -1459,10 +1530,21 @@
     });
 
     toggleSidebarBtnEl.addEventListener("click", () => {
-      sidebarHidden = !sidebarHidden;
-      localStorage.setItem(SIDEBAR_KEY, String(sidebarHidden));
+      if (isMobile()) {
+        asideEl.classList.toggle("mobile-open");
+      } else {
+        sidebarHidden = !sidebarHidden;
+        localStorage.setItem(SIDEBAR_KEY, String(sidebarHidden));
+      }
       applySidebarState();
     });
+
+    backdropEl.addEventListener("click", () => {
+      asideEl.classList.remove("mobile-open");
+      applySidebarState();
+    });
+
+    window.addEventListener("resize", applySidebarState);
 
     async function loginOnly() {
       const email = authEmailEl.value.trim();
