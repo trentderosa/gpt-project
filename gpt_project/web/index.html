@@ -281,8 +281,14 @@
     }
     .bubble-content li { margin: 0 0 5px 0; }
     .bubble-content a {
+      color: var(--brand);
+      text-decoration: underline;
+      text-underline-offset: 2px;
+      word-break: normal;
       overflow-wrap: anywhere;
-      word-break: break-all;
+    }
+    .bubble-content a:hover {
+      opacity: 0.8;
     }
     .bubble-content code {
       background: var(--code-bg);
@@ -1054,9 +1060,36 @@
     }
 
     function formatInline(text) {
-      let out = escapeHtml(text);
-      out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
-      out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      // Split on markdown links [label](url) and bare URLs so we can process
+      // each piece without double-escaping URLs.
+      const urlPattern = /(\[([^\]]+)\]\((https?:\/\/[^\s)]+)\))|(https?:\/\/[^\s<>"]+)/g;
+      let out = "";
+      let last = 0;
+      let m;
+      while ((m = urlPattern.exec(text)) !== null) {
+        // escape and format the plain text before this match
+        const plain = text.slice(last, m.index);
+        let esc = escapeHtml(plain);
+        esc = esc.replace(/`([^`]+)`/g, "<code>$1</code>");
+        esc = esc.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+        out += esc;
+        if (m[1]) {
+          // markdown link: [label](url)
+          out += `<a href="${escapeHtml(m[3])}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(m[3])}">${escapeHtml(m[2])}</a>`;
+        } else {
+          // bare URL — show hostname as the label, full URL on hover
+          const url = m[0];
+          let label = url;
+          try { label = new URL(url).hostname.replace(/^www\./, ""); } catch (_) {}
+          out += `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(url)}">${escapeHtml(label)}</a>`;
+        }
+        last = m.index + m[0].length;
+      }
+      // remaining plain text
+      let tail = escapeHtml(text.slice(last));
+      tail = tail.replace(/`([^`]+)`/g, "<code>$1</code>");
+      tail = tail.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      out += tail;
       return out;
     }
 
@@ -1150,11 +1183,17 @@
     }
 
     function createBotBubble(initialText = "") {
+      const model = modelSelectEl?.value || "gpt-4o-mini";
       const div = document.createElement("div");
       div.className = "bubble bot";
+      // Thinking indicator — visible until real content arrives
+      const thinkDiv = document.createElement("div");
+      thinkDiv.className = "thinking";
+      thinkDiv.innerHTML = `<span>Cortex Engine is thinking</span><span class="model-badge">${escapeHtml(MODEL_DISPLAY[model] || model)}</span><span class="thinking-dots"><span></span><span></span><span></span></span>`;
+      div.appendChild(thinkDiv);
       const content = document.createElement("div");
       content.className = "bubble-content";
-      content.innerHTML = formatMessageText(initialText);
+      content.style.display = "none";
       div.appendChild(content);
       const actions = document.createElement("div");
       actions.className = "bubble-actions";
@@ -1167,11 +1206,25 @@
       });
       actions.appendChild(copyBtn);
       div.appendChild(actions);
+      // If created with initial text, skip thinking state immediately
+      if (initialText) {
+        thinkDiv.style.display = "none";
+        content.style.display = "";
+        content.innerHTML = formatMessageText(initialText);
+        actions.style.display = "";
+      }
       chatEl.appendChild(div);
       pruneChatIfNeeded();
       chatEl.scrollTop = chatEl.scrollHeight;
-      lastBotBubble = { div, content, actions };
+      lastBotBubble = { div, content, actions, thinkDiv };
       return lastBotBubble;
+    }
+
+    function revealBubbleContent(bubble, text) {
+      bubble.thinkDiv.style.display = "none";
+      bubble.content.style.display = "";
+      bubble.content.innerHTML = formatMessageText(text);
+      bubble.actions.style.display = "";
     }
 
     function showThinking() {
@@ -1282,13 +1335,14 @@
           throw new Error(data.detail || "Request failed");
         }
 
+        hideThinking();
+        const bubble = createBotBubble(""); // shows thinking dots inside the bubble
         const reader = res.body?.getReader();
         if (!reader) throw new Error("Streaming not supported by browser.");
         const decoder = new TextDecoder("utf-8");
         let buffer = "";
         let builtAnswer = "";
         let finalPayload = null;
-        let bubble = null;
 
         while (true) {
           const { value, done } = await reader.read();
@@ -1311,21 +1365,16 @@
               conversationId = parsed.conversation_id;
               localStorage.setItem(KEY, conversationId);
             } else if (eventName === "token" && parsed?.token) {
-              if (!bubble) { hideThinking(); bubble = createBotBubble(""); }
               builtAnswer += parsed.token;
-              bubble.content.innerHTML = formatMessageText(builtAnswer);
-              bubble.actions.style.display = "";
+              revealBubbleContent(bubble, builtAnswer);
               chatEl.scrollTop = chatEl.scrollHeight;
             } else if (eventName === "replace" && parsed?.answer) {
-              if (!bubble) { hideThinking(); bubble = createBotBubble(""); }
               builtAnswer = parsed.answer;
-              bubble.content.innerHTML = formatMessageText(builtAnswer);
-              bubble.actions.style.display = "";
+              revealBubbleContent(bubble, builtAnswer);
               chatEl.scrollTop = chatEl.scrollHeight;
             } else if (eventName === "error") {
-              if (!bubble) { hideThinking(); bubble = createBotBubble(""); }
               builtAnswer = parsed?.detail || "An error occurred. Please try again.";
-              bubble.content.innerHTML = formatMessageText(builtAnswer);
+              revealBubbleContent(bubble, builtAnswer);
             } else if (eventName === "done") {
               finalPayload = parsed;
             }
@@ -1337,9 +1386,7 @@
           localStorage.setItem(KEY, conversationId);
         }
         const finalAnswer = finalPayload?.answer || builtAnswer || "No response generated.";
-        if (!bubble) { hideThinking(); bubble = createBotBubble(""); }
-        bubble.content.innerHTML = formatMessageText(finalAnswer);
-        bubble.actions.style.display = "";
+        revealBubbleContent(bubble, finalAnswer);
         if (finalPayload?.generated_images?.length) {
           for (const src of finalPayload.generated_images) {
             addImage(src, "AI generated image");
