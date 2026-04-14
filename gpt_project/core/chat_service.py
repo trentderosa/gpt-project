@@ -164,11 +164,19 @@ CURRENT_QUERY_HINTS = {
 }
 
 STALE_ANSWER_HINTS = {
+    "as of 2022",
     "as of 2023",
     "as of late 2023",
+    "as of early 2024",
+    "as of 2024",
     "as of my last update",
     "up to my last training",
+    "based on my training",
+    "my knowledge cutoff",
+    "my training data",
     "i don't have the latest specific",
+    "i don't have access to real-time",
+    "i cannot access real-time",
 }
 
 NAME_PATTERNS = [
@@ -194,6 +202,24 @@ ACK_MESSAGES = {
     "got it",
     "alright",
     "cool",
+}
+
+# Authoritative source domains grouped by query category.
+_AUTHORITY_DOMAINS: dict[str, set[str]] = {
+    "sports": {
+        "espn.com", "nfl.com", "nba.com", "mlb.com", "nhl.com", "pga.com",
+        "masters.com", "fifa.com", "si.com", "cbssports.com", "bleacherreport.com",
+        "olympics.com", "uefa.com", "tennis.com", "atptour.com",
+    },
+    "finance": {
+        "bloomberg.com", "reuters.com", "wsj.com", "marketwatch.com", "cnbc.com",
+        "finance.yahoo.com", "sec.gov", "morningstar.com", "ft.com",
+    },
+    "news": {
+        "reuters.com", "apnews.com", "bbc.com", "nytimes.com", "wsj.com",
+        "npr.org", "theguardian.com", "politico.com",
+    },
+    "government": {".gov", ".edu"},
 }
 
 
@@ -261,7 +287,39 @@ class ChatService:
         query = question.strip()
         if not query:
             return []
-        queries = [query]
+        q_lower = query.lower()
+        year = datetime.now().year
+
+        # Build a stronger primary query for known factual patterns.
+        primary = query
+
+        # Sports winner/result: "who won the masters", "who won the super bowl", etc.
+        if re.search(r'\b(?:who won|who is winning|who will win|winner of|champions? of|results? of)\b', q_lower):
+            clean = re.sub(r'[?!]+$', '', query).strip()
+            primary = f"{clean} {year} winner result"
+
+        # Leadership queries: "who is the CEO of X", "CEO of OpenAI", etc.
+        elif re.search(r'\b(?:ceo|president|cfo|cto|head of|founder of|who (?:runs|leads|is the (?:ceo|president|head|chief)))\b', q_lower):
+            clean = re.sub(r'[?!]+$', '', query).strip()
+            primary = f"{clean} {year} current"
+
+        # "Latest news on X" or "what happened with X"
+        elif re.search(r'\b(?:latest news|what happened|news about|update on|updates on)\b', q_lower):
+            clean = re.sub(r'[?!]+$', '', query).strip()
+            primary = f"{clean} {year}"
+
+        queries = [primary]
+
+        # For any current-event or factual query, add a year-anchored and "latest" variant.
+        if self._is_current_events_query(query) or primary != query:
+            year_query = f"{query} {year}"
+            if year_query.lower().strip() != primary.lower().strip():
+                queries.append(year_query)
+            latest_query = f"latest {query}"
+            normed = {q.strip().lower() for q in queries}
+            if latest_query.lower().strip() not in normed:
+                queries.append(latest_query)
+
         if self._needs_market_context(query):
             queries.extend(
                 [
@@ -269,11 +327,9 @@ class ChatService:
                     "SPY QQQ DIA market update today",
                 ]
             )
-        if self._is_current_events_query(query):
-            queries.append(f"{query} {datetime.now().year}")
-            queries.append(f"latest {query}")
+
         deduped: list[str] = []
-        seen = set()
+        seen: set[str] = set()
         for q in queries:
             norm = q.strip().lower()
             if not norm or norm in seen:
@@ -307,6 +363,60 @@ class ChatService:
         }
         return any(token in text for token in finance_tokens)
 
+    def _rank_web_results(self, results: list[dict], question: str) -> list[dict]:
+        """Re-rank results to prefer authoritative sources for relevant query types."""
+        if len(results) <= 1:
+            return results
+        q_lower = question.lower()
+        authority_domains: set[str] = set()
+        if re.search(r'\b(?:won|winner|score|champion|tournament|game|match|season|cup|title)\b', q_lower):
+            authority_domains.update(_AUTHORITY_DOMAINS["sports"])
+        if re.search(r'\b(?:stock|price|market|nasdaq|dow|share|etf|fund)\b', q_lower):
+            authority_domains.update(_AUTHORITY_DOMAINS["finance"])
+        if re.search(r'\b(?:ceo|president|founder|leader|executive|who (?:runs|leads))\b', q_lower):
+            authority_domains.update(_AUTHORITY_DOMAINS["news"] | _AUTHORITY_DOMAINS["finance"])
+        if re.search(r'\b(?:law|regulation|policy|government|election|congress|senate)\b', q_lower):
+            authority_domains.update(_AUTHORITY_DOMAINS["government"] | _AUTHORITY_DOMAINS["news"])
+        if not authority_domains:
+            return results
+
+        def _priority(item: dict) -> int:
+            url = (item.get("url") or "").lower()
+            for domain in authority_domains:
+                if domain in url:
+                    return 0
+            return 1
+
+        return sorted(results, key=_priority)
+
+    def _build_web_context_block(self, web_results: list[dict]) -> str:
+        """Build a structured, prominently-labeled LIVE WEB RESULTS block."""
+        if not web_results:
+            return ""
+        lines = ["=== LIVE WEB RESULTS (PRIMARY SOURCE OF TRUTH) ==="]
+        for i, item in enumerate(web_results, 1):
+            title = (item.get("title") or "Untitled").strip()
+            url = (item.get("url") or "").strip()
+            snippet = (item.get("snippet") or "").strip()
+            date = (item.get("date") or item.get("published") or item.get("age") or "").strip()
+            lines.append(f"\n[Result {i}]")
+            lines.append(f"Title: {title}")
+            if url:
+                lines.append(f"URL: {url}")
+            if date:
+                lines.append(f"Date: {date}")
+            if snippet:
+                lines.append(f"Snippet: {snippet}")
+        lines.append("\n=== END LIVE WEB RESULTS ===")
+        lines.append(
+            "\nInstruction: The LIVE WEB RESULTS above are the authoritative source. "
+            "Base factual claims on them. Do not contradict or silently override them with training knowledge. "
+            "If results are incomplete or conflicting, say so. "
+            "If the results do not clearly answer the question, say that current information could not be verified "
+            "rather than filling gaps from memory.\n"
+        )
+        return "\n".join(lines) + "\n\n"
+
     def _search_live_web(self, question: str, max_results: int = 5) -> list[dict]:
         merged: list[dict] = []
         seen_urls: set[str] = set()
@@ -325,8 +435,8 @@ class ChatService:
                 seen_urls.add(url)
                 merged.append(item)
                 if len(merged) >= max_results:
-                    return merged
-        return merged
+                    return self._rank_web_results(merged, question)
+        return self._rank_web_results(merged, question)
 
     def _trim_history(self, history: list[dict], max_messages: int = 16, max_chars: int = 12000) -> list[dict]:
         trimmed = history[-max_messages:]
@@ -925,7 +1035,8 @@ class ChatService:
             context = ""
 
         web_results: list[dict] = []
-        if use_web_search:
+        _effective_web = use_web_search or (ALWAYS_WEB_SEARCH and not self._is_web_search_exempt(question))
+        if _effective_web:
             web_results = self._search_live_web(question, max_results=5)
 
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -958,15 +1069,7 @@ class ChatService:
             topic_news = self._topic_news_context(question)
             if topic_news:
                 news_context += topic_news
-        web_context = (
-            "\n\nWeb results:\n"
-            + "\n".join(
-                f"- {item.get('title', 'Untitled')}: {item.get('snippet', '')} ({item.get('url', '')})"
-                for item in web_results
-            )
-            if web_results
-            else ""
-        )
+        web_context = self._build_web_context_block(web_results)
         note_context_block = ""
         if context:
             note_context_block = f"Context from local notes:\n{context}\n\n"
@@ -983,12 +1086,13 @@ class ChatService:
                     f"{weather_context}"
                     f"{market_context}"
                     f"{news_context}"
+                    f"{web_context}"
                     f"{profile_context}"
                     f"{uploaded_file_context or ''}"
                     f"{note_context_block}"
                     f"{anti_refusal}"
                     f"{anti_stale}"
-                    f"User question:\n{question}{web_context}"
+                    f"User question:\n{question}"
                 ),
             }
         )
@@ -1103,12 +1207,12 @@ class ChatService:
             tn = self._topic_news_context(question)
             if tn:
                 news_ctx += tn
-        web_ctx = ("\n\nWeb results:\n" + "\n".join("- " + str(i.get("title", "Untitled")) + ": " + str(i.get("snippet", "")) + " (" + str(i.get("url", "")) + ")" for i in web_results)) if web_results else ""
+        web_ctx = self._build_web_context_block(web_results)
         note_blk = ("Context from local notes:\n" + context + "\n\n") if context else ""
         live = bool(web_results) or bool(market_ctx.strip()) or bool(news_ctx.strip()) or bool(weather_ctx.strip())
         anti_r = "" if has_strong else "Instruction: If local notes do not cover this, answer from general knowledge.\n\n"
         anti_s = ("Instruction: Use the live context provided above. Do not reference training cutoff dates.\n\n" if self._is_current_events_query(question) and live else "")
-        messages.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+profile_ctx+(uploaded_file_context or "")+note_blk+anti_r+anti_s+"User question:\n"+question+web_ctx})
+        messages.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+web_ctx+profile_ctx+(uploaded_file_context or "")+note_blk+anti_r+anti_s+"User question:\n"+question})
         streamed = []
         try:
             for token in self.llm.chat_stream(messages=messages, model=model):
@@ -1149,4 +1253,4 @@ class ChatService:
         if history is None:
             self.history.append({"role": "user", "content": question})
             self.history.append({"role": "assistant", "content": answer})
-        yield ("done", {"answer": answer, "hits": hits, "web_results": web_results, "updated_profile": updated_profile, "used_web_search": bool(web_results)})
+        yield ("done", {"answer": answer, "hits": hits, "web_results": web_results, "updated_profile": updated_profile, "used_web_search": bool(web_results), "source_count": len(web_results)})

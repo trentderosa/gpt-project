@@ -27,6 +27,7 @@ class DuckDuckGoSearchTool(WebSearchTool):
                             "title": item.get("title", ""),
                             "snippet": item.get("body", ""),
                             "url": item.get("href", ""),
+                            "date": item.get("published", ""),
                         }
                     )
         except Exception:
@@ -95,6 +96,7 @@ class BraveSearchTool(WebSearchTool):
                         "title": item.get("title", ""),
                         "snippet": item.get("description", ""),
                         "url": item.get("url", ""),
+                        "date": item.get("age", "") or item.get("page_age", ""),
                     }
                 )
             return results
