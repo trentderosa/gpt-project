@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import logging
 import re
 import xml.etree.ElementTree as ET
 import time
@@ -7,6 +8,8 @@ from zoneinfo import ZoneInfo
 import requests
 import csv
 from io import StringIO
+
+logger = logging.getLogger("cortex.chat")
 
 from .config import ALWAYS_WEB_SEARCH, MIN_SCORE, TOP_K
 from .live_data_store import LiveDataStore
@@ -30,11 +33,14 @@ Cite the most relevant source URLs inline when they directly support a claim.
 For any time-sensitive topic — current events, news, prices, sports scores, politics, company details,
 software versions, laws, regulations, product info, rankings, schedules, or anything about living people —
 rely exclusively on the provided web results. Do not fill gaps from training memory.
-If web results are provided but do not clearly answer the question, say so explicitly.
-If no web results are available and the question is time-sensitive, state clearly that current
-information could not be verified, then give your best-effort answer with explicit uncertainty labeling.
+If web results are provided but do not clearly answer the question, say so and give a best-effort answer.
+If no web results are available and the question is time-sensitive, give your best-effort answer
+based on general knowledge and briefly note it may not reflect the latest information.
 Never present stale training data as current fact. Never say 'as of my last update' or reference
 a past cutoff year as if it is reliable current information.
+Never say "unable to retrieve live data", "I don't have real-time access", "I cannot retrieve",
+"I cannot access real-time", "I don't have access to live data", or any similar refusal phrase.
+Always provide a direct, concrete, useful answer — never a dead end.
 
 If runtime date/time context is provided, use it for questions about today's date, day, or time.
 If local notes and web results do not cover a question, use general knowledge and be clear when uncertain.
@@ -90,6 +96,31 @@ LIVE_RETRIEVAL_REFUSAL_HINTS = {
     "cannot pull live",
     "can't provide live",
     "cannot provide live",
+    "unable to retrieve live",
+    "unable to retrieve real",
+    "i'm unable to retrieve",
+    "i am unable to retrieve",
+    "don't have real-time",
+    "don't have access to real-time",
+    "don't have access to live",
+    "do not have real-time",
+    "do not have access to real-time",
+    "can't access real-time",
+    "cannot access real-time",
+    "can't provide real-time",
+    "cannot provide real-time",
+    "no access to real-time",
+    "no access to live",
+    "i'm not able to retrieve",
+    "i am not able to retrieve",
+    "not able to access live",
+    "not able to access real-time",
+    "unable to access live",
+    "unable to access real-time",
+    "can't fetch live",
+    "cannot fetch live",
+    "unable to fetch live",
+    "don't have the ability to retrieve",
 }
 
 MARKET_DEFLECTION_HINTS = {
@@ -141,6 +172,39 @@ NEWS_QUERY_HINTS = {
     "breaking",
     "current events",
     "latest news",
+}
+
+SPORTS_QUERY_HINTS = {
+    "score",
+    "game",
+    "match",
+    "record",
+    "standings",
+    "nba",
+    "nfl",
+    "nhl",
+    "mlb",
+    "nascar",
+    "mls",
+    "playoff",
+    "playoffs",
+    "championship",
+    "tournament",
+    "league",
+    "season",
+    "roster",
+    "draft",
+    "trade",
+    "injured",
+    "injury",
+    "golfer",
+    "tennis",
+    "masters",
+    "super bowl",
+    "world series",
+    "stanley cup",
+    "march madness",
+    "world cup",
 }
 
 CURRENT_QUERY_HINTS = {
@@ -270,6 +334,10 @@ class ChatService:
         q = question.lower()
         return any(hint in q for hint in CURRENT_QUERY_HINTS)
 
+    def _needs_sports_context(self, question: str) -> bool:
+        q = question.lower()
+        return any(hint in q for hint in SPORTS_QUERY_HINTS)
+
     def _is_web_search_exempt(self, question: str) -> bool:
         """Return True for queries where live web search adds no value:
         creative writing, translation, rewriting user text, pure math, small talk."""
@@ -289,29 +357,34 @@ class ChatService:
             return []
         q_lower = query.lower()
         year = datetime.now().year
+        clean = re.sub(r'[?!]+$', '', query).strip()
 
         # Build a stronger primary query for known factual patterns.
         primary = query
 
+        # Sports: scores, records, standings, game results.
+        if self._needs_sports_context(query):
+            primary = f"{clean} {year} latest score result standings"
+
         # Sports winner/result: "who won the masters", "who won the super bowl", etc.
-        if re.search(r'\b(?:who won|who is winning|who will win|winner of|champions? of|results? of)\b', q_lower):
-            clean = re.sub(r'[?!]+$', '', query).strip()
+        elif re.search(r'\b(?:who won|who is winning|who will win|winner of|champions? of|results? of)\b', q_lower):
             primary = f"{clean} {year} winner result"
 
         # Leadership queries: "who is the CEO of X", "CEO of OpenAI", etc.
         elif re.search(r'\b(?:ceo|president|cfo|cto|head of|founder of|who (?:runs|leads|is the (?:ceo|president|head|chief)))\b', q_lower):
-            clean = re.sub(r'[?!]+$', '', query).strip()
             primary = f"{clean} {year} current"
 
         # "Latest news on X" or "what happened with X"
         elif re.search(r'\b(?:latest news|what happened|news about|update on|updates on)\b', q_lower):
-            clean = re.sub(r'[?!]+$', '', query).strip()
             primary = f"{clean} {year}"
+
+        # Finance: stock/price queries — keep the original; market context handles structured data.
+        # (no rewrite needed; market context fetches direct quotes)
 
         queries = [primary]
 
-        # For any current-event or factual query, add a year-anchored and "latest" variant.
-        if self._is_current_events_query(query) or primary != query:
+        # For current-event or rewritten factual queries, always add year-anchored + "latest" variants.
+        if self._is_current_events_query(query) or self._needs_sports_context(query) or primary != query:
             year_query = f"{query} {year}"
             if year_query.lower().strip() != primary.lower().strip():
                 queries.append(year_query)
@@ -411,9 +484,10 @@ class ChatService:
         lines.append(
             "\nInstruction: The LIVE WEB RESULTS above are the authoritative source. "
             "Base factual claims on them. Do not contradict or silently override them with training knowledge. "
-            "If results are incomplete or conflicting, say so. "
-            "If the results do not clearly answer the question, say that current information could not be verified "
-            "rather than filling gaps from memory.\n"
+            "Extract and state specific values directly from the snippets: exact numbers, names, scores, prices, dates, and records. "
+            "Prefer concrete facts over vague summaries. "
+            "If results are incomplete or conflicting, say so briefly and still give your best-effort answer. "
+            "Never say you cannot retrieve live data.\n"
         )
         return "\n".join(lines) + "\n\n"
 
@@ -421,10 +495,12 @@ class ChatService:
         merged: list[dict] = []
         seen_urls: set[str] = set()
         market_query = self._needs_market_context(question)
+
         for query in self._web_queries(question):
             try:
                 items = self.web_search_tool.search(query, max_results=max_results)
-            except Exception:
+            except Exception as exc:
+                logger.warning("web_search_failed query=%r error=%s", query[:100], exc)
                 items = []
             for item in items:
                 url = (item.get("url") or "").strip()
@@ -436,6 +512,35 @@ class ChatService:
                 merged.append(item)
                 if len(merged) >= max_results:
                     return self._rank_web_results(merged, question)
+
+        # If market filter dropped everything, retry the top query without the filter.
+        if not merged and market_query:
+            logger.info("web_search_market_filter_relaxed question=%r", question[:100])
+            top_query = self._web_queries(question)[0] if self._web_queries(question) else question
+            try:
+                items = self.web_search_tool.search(top_query, max_results=max_results)
+                for item in items:
+                    url = (item.get("url") or "").strip()
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        merged.append(item)
+            except Exception as exc:
+                logger.warning("web_search_market_relaxed_failed error=%s", exc)
+
+        # Final fallback: if still empty, retry once with a simplified "latest" query.
+        if not merged:
+            year = datetime.now().year
+            fallback_q = f"latest {question.strip().rstrip('?!')} {year}"
+            logger.info("web_search_fallback_retry question=%r fallback=%r", question[:100], fallback_q[:100])
+            try:
+                items = self.web_search_tool.search(fallback_q, max_results=max_results)
+                for item in items:
+                    url = (item.get("url") or "").strip()
+                    if url and url not in seen_urls:
+                        merged.append(item)
+            except Exception as exc:
+                logger.warning("web_search_fallback_failed error=%s", exc)
+
         return self._rank_web_results(merged, question)
 
     def _trim_history(self, history: list[dict], max_messages: int = 16, max_chars: int = 12000) -> list[dict]:
@@ -550,6 +655,10 @@ class ChatService:
         return any(hint in text for hint in MARKET_DEFLECTION_HINTS) or self._looks_like_live_retrieval_refusal(
             answer
         )
+
+    def _looks_like_refusal_output(self, answer: str) -> bool:
+        """True if the answer contains any live-retrieval refusal or stale-data phrase."""
+        return self._looks_like_live_retrieval_refusal(answer) or self._looks_stale_current_answer(answer)
 
     def _looks_stale_current_answer(self, answer: str) -> bool:
         text = (answer or "").lower()
@@ -758,10 +867,8 @@ class ChatService:
             if query_location:
                 lat_lon = self._geocode_location(query_location)
         if not lat_lon:
-            return (
-                "Live weather context:\n"
-                "- Could not determine weather location. Ask user to enable location access or provide city and state/country.\n\n"
-            )
+            # No location available — let web search results cover the weather question.
+            return ""
         lat, lon = lat_lon
         use_us_units = self._use_us_units(
             user_location_label=user_location_label,
@@ -797,7 +904,8 @@ class ChatService:
                 f"- Weather code: {cur.get('weather_code', 'unknown')}\n\n"
             )
         except Exception:
-            return "Live weather context:\n- Weather lookup failed for this request.\n\n"
+            logger.warning("weather_api_failed lat=%s lon=%s", lat, lon)
+            return ""
 
     def _extract_symbols_from_question(self, question: str) -> list[str]:
         # Pick uppercase ticker-style tokens, $-prefixed symbols, and common lowercase ticker mentions.
@@ -918,7 +1026,8 @@ class ChatService:
 
         rows = self.live_store.get_latest("stock", limit=10)
         if not rows:
-            return "Live market context:\n- Market lookup failed for this request.\n\n"
+            logger.info("market_lookup_all_sources_failed question=%r", question[:100])
+            return ""
         lines = ["Live market context (cached snapshot):"]
         for item in rows[:10]:
             payload = item.get("payload", {})
@@ -935,7 +1044,7 @@ class ChatService:
     def _live_news_context(self) -> str:
         rows = self.live_store.get_latest("news", limit=5)
         if not rows:
-            return "Live news context:\n- No cached news snapshots are available.\n\n"
+            return ""
         lines = ["Live news context (latest headlines):"]
         for row in rows[:5]:
             payload = row.get("payload", {})
@@ -1109,15 +1218,41 @@ class ChatService:
                         f"{weather_context}"
                         f"{market_context}"
                         f"{news_context}"
+                        f"{web_context}"
                         f"{profile_context}"
                         f"{uploaded_file_context or ''}"
                         f"Question: {question}\n\n"
-                        "Give a direct answer using general knowledge. "
+                        "Give a direct answer using available live context or general knowledge. "
                         "If uncertain, state uncertainty briefly, then still provide your best useful answer."
                     ),
                 }
             )
             answer = self.llm.chat(messages=fallback_messages, model=model)
+
+        # Universal refusal guard: if the model still produced a live-retrieval refusal, regenerate once.
+        if self._looks_like_refusal_output(answer):
+            logger.info("refusal_output_detected question=%r — regenerating", question[:100])
+            regen_msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+            regen_msgs.extend(self._trim_history(effective_history))
+            regen_msgs.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"{runtime_context}"
+                        f"{weather_context}"
+                        f"{market_context}"
+                        f"{news_context}"
+                        f"{web_context}"
+                        f"{profile_context}"
+                        f"{uploaded_file_context or ''}"
+                        f"Question: {question}\n\n"
+                        "Give a direct, concrete, useful answer. "
+                        "Do not say you cannot access real-time or live data. "
+                        "Use the live context above if available. Otherwise use general knowledge and note uncertainty briefly."
+                    ),
+                }
+            )
+            answer = self.llm.chat(messages=regen_msgs, model=model)
 
         if self._is_current_events_query(question) and self._looks_stale_current_answer(answer):
             has_live_signal = bool(web_results) or bool(market_context.strip()) or bool(news_context.strip()) or bool(
@@ -1225,8 +1360,17 @@ class ChatService:
         if self._looks_like_notes_refusal(answer):
             fbk = [{"role": "system", "content": SYSTEM_PROMPT}]
             fbk.extend(self._trim_history(eff_h))
-            fbk.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+profile_ctx+(uploaded_file_context or "")+"Question: "+question+"\n\nGive a direct answer using general knowledge. If uncertain, state uncertainty briefly, then still provide your best useful answer."})
+            fbk.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+web_ctx+profile_ctx+(uploaded_file_context or "")+"Question: "+question+"\n\nGive a direct answer using available live context or general knowledge. If uncertain, state uncertainty briefly, then still provide your best useful answer."})
             answer = self.llm.chat(messages=fbk, model=model)
+            yield ("replace", answer)
+
+        # Universal refusal guard: if the model produced a live-retrieval refusal, regenerate once.
+        if self._looks_like_refusal_output(answer):
+            logger.info("refusal_output_detected_stream question=%r — regenerating", question[:100])
+            regen = [{"role": "system", "content": SYSTEM_PROMPT}]
+            regen.extend(self._trim_history(eff_h))
+            regen.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+web_ctx+profile_ctx+(uploaded_file_context or "")+"Question: "+question+"\n\nGive a direct, concrete, useful answer. Do not say you cannot access real-time or live data. Use live context above if available. Otherwise use general knowledge and note uncertainty briefly."})
+            answer = self.llm.chat(messages=regen, model=model)
             yield ("replace", answer)
         if self._is_current_events_query(question) and self._looks_stale_current_answer(answer):
             if not live:
