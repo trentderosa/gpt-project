@@ -2,17 +2,17 @@ import requests
 
 
 class WebSearchTool:
-    def search(self, query: str, max_results: int = 3) -> list[dict]:
+    def search(self, query: str, max_results: int = 3, fresh: bool = False) -> list[dict]:
         raise NotImplementedError
 
 
 class DisabledWebSearchTool(WebSearchTool):
-    def search(self, query: str, max_results: int = 3) -> list[dict]:
+    def search(self, query: str, max_results: int = 3, fresh: bool = False) -> list[dict]:
         return []
 
 
 class DuckDuckGoSearchTool(WebSearchTool):
-    def search(self, query: str, max_results: int = 3) -> list[dict]:
+    def search(self, query: str, max_results: int = 3, fresh: bool = False) -> list[dict]:
         try:
             from duckduckgo_search import DDGS
         except Exception:
@@ -21,7 +21,9 @@ class DuckDuckGoSearchTool(WebSearchTool):
         results: list[dict] = []
         try:
             with DDGS() as ddgs:
-                for item in ddgs.text(query, max_results=max_results):
+                # timelimit='m' restricts results to the past month — prevents stale 2023-2024 snippets
+                timelimit = "m" if fresh else None
+                for item in ddgs.text(query, max_results=max_results, timelimit=timelimit):
                     results.append(
                         {
                             "title": item.get("title", ""),
@@ -36,7 +38,8 @@ class DuckDuckGoSearchTool(WebSearchTool):
 
 
 class WikipediaSearchTool(WebSearchTool):
-    def search(self, query: str, max_results: int = 3) -> list[dict]:
+    def search(self, query: str, max_results: int = 3, fresh: bool = False) -> list[dict]:
+        # Wikipedia is a static reference; freshness filter is not applicable.
         q = (query or "").strip()
         if not q:
             return []
@@ -76,14 +79,18 @@ class BraveSearchTool(WebSearchTool):
     def __init__(self, api_key: str):
         self.api_key = (api_key or "").strip()
 
-    def search(self, query: str, max_results: int = 3) -> list[dict]:
+    def search(self, query: str, max_results: int = 3, fresh: bool = False) -> list[dict]:
         if not self.api_key:
             return []
         try:
+            params: dict = {"q": query, "count": max_results}
+            if fresh:
+                # freshness='pm' restricts results to the past month
+                params["freshness"] = "pm"
             resp = requests.get(
                 "https://api.search.brave.com/res/v1/web/search",
                 headers={"Accept": "application/json", "X-Subscription-Token": self.api_key},
-                params={"q": query, "count": max_results},
+                params=params,
                 timeout=8,
             )
             resp.raise_for_status()
@@ -108,12 +115,16 @@ class CompositeWebSearchTool(WebSearchTool):
     def __init__(self, providers: list[WebSearchTool]):
         self.providers = providers
 
-    def search(self, query: str, max_results: int = 3) -> list[dict]:
+    def search(self, query: str, max_results: int = 3, fresh: bool = False) -> list[dict]:
         merged: list[dict] = []
         seen: set[str] = set()
         for provider in self.providers:
+            # Skip Wikipedia for fresh searches — its content is evergreen but not time-filtered,
+            # so it can introduce 2023-2024 data that predates what the user is asking about.
+            if fresh and isinstance(provider, WikipediaSearchTool):
+                continue
             try:
-                items = provider.search(query, max_results=max_results)
+                items = provider.search(query, max_results=max_results, fresh=fresh)
             except Exception:
                 items = []
             for item in items:

@@ -214,6 +214,7 @@ CURRENT_QUERY_HINTS = {
     "right now",
     "this week",
     "this month",
+    "this year",
     "breaking",
     "news",
     "weather",
@@ -225,6 +226,12 @@ CURRENT_QUERY_HINTS = {
     "bitcoin",
     "crypto",
     "traffic",
+    "2025",
+    "2026",
+    "who won",
+    "who is the ceo",
+    "who runs",
+    "who leads",
 }
 
 STALE_ANSWER_HINTS = {
@@ -233,11 +240,16 @@ STALE_ANSWER_HINTS = {
     "as of late 2023",
     "as of early 2024",
     "as of 2024",
+    "as of early 2025",
+    "as of 2025",
     "as of my last update",
     "up to my last training",
     "based on my training",
     "my knowledge cutoff",
+    "my knowledge extends",
     "my training data",
+    "i was last updated",
+    "as of my training",
     "i don't have the latest specific",
     "i don't have access to real-time",
     "i cannot access real-time",
@@ -337,6 +349,16 @@ class ChatService:
     def _needs_sports_context(self, question: str) -> bool:
         q = question.lower()
         return any(hint in q for hint in SPORTS_QUERY_HINTS)
+
+    def _is_freshness_sensitive(self, question: str) -> bool:
+        """True for queries where only recent search results are trustworthy.
+        These queries bypass stale search content by requesting time-limited results.
+        """
+        return (
+            self._is_current_events_query(question)
+            or self._needs_sports_context(question)
+            or bool(re.search(r'\b(202[5-9]|this year|right now|today|tonight|this week|this month)\b', question, re.IGNORECASE))
+        )
 
     def _is_web_search_exempt(self, question: str) -> bool:
         """Return True for queries where live web search adds no value:
@@ -495,13 +517,17 @@ class ChatService:
         merged: list[dict] = []
         seen_urls: set[str] = set()
         market_query = self._needs_market_context(question)
+        fresh = self._is_freshness_sensitive(question)
 
-        for query in self._web_queries(question):
+        if fresh:
+            logger.info("web_search_fresh_mode question=%r", question[:100])
+
+        def _collect(query: str, use_fresh: bool) -> None:
             try:
-                items = self.web_search_tool.search(query, max_results=max_results)
+                items = self.web_search_tool.search(query, max_results=max_results, fresh=use_fresh)
             except Exception as exc:
-                logger.warning("web_search_failed query=%r error=%s", query[:100], exc)
-                items = []
+                logger.warning("web_search_failed query=%r fresh=%s error=%s", query[:100], use_fresh, exc)
+                return
             for item in items:
                 url = (item.get("url") or "").strip()
                 if not url or url in seen_urls:
@@ -510,15 +536,28 @@ class ChatService:
                     continue
                 seen_urls.add(url)
                 merged.append(item)
-                if len(merged) >= max_results:
-                    return self._rank_web_results(merged, question)
 
-        # If market filter dropped everything, retry the top query without the filter.
+        # Primary pass: use time-limited search for freshness-sensitive queries.
+        for query in self._web_queries(question):
+            _collect(query, use_fresh=fresh)
+            if len(merged) >= max_results:
+                logger.info("web_search_complete fresh=%s source_count=%d", fresh, len(merged))
+                return self._rank_web_results(merged[:max_results], question)
+
+        # If fresh-mode returned nothing, retry the same queries WITHOUT the time limit.
+        if not merged and fresh:
+            logger.info("web_search_fresh_empty_retrying_no_timelimit question=%r", question[:100])
+            for query in self._web_queries(question)[:2]:
+                _collect(query, use_fresh=False)
+                if len(merged) >= max_results:
+                    break
+
+        # If market filter dropped everything, retry top query without the filter.
         if not merged and market_query:
             logger.info("web_search_market_filter_relaxed question=%r", question[:100])
             top_query = self._web_queries(question)[0] if self._web_queries(question) else question
             try:
-                items = self.web_search_tool.search(top_query, max_results=max_results)
+                items = self.web_search_tool.search(top_query, max_results=max_results, fresh=False)
                 for item in items:
                     url = (item.get("url") or "").strip()
                     if url and url not in seen_urls:
@@ -527,13 +566,13 @@ class ChatService:
             except Exception as exc:
                 logger.warning("web_search_market_relaxed_failed error=%s", exc)
 
-        # Final fallback: if still empty, retry once with a simplified "latest" query.
+        # Final fallback: simplified "latest {question} {year}" query.
         if not merged:
             year = datetime.now().year
             fallback_q = f"latest {question.strip().rstrip('?!')} {year}"
-            logger.info("web_search_fallback_retry question=%r fallback=%r", question[:100], fallback_q[:100])
+            logger.info("web_search_fallback_retry fallback=%r", fallback_q[:100])
             try:
-                items = self.web_search_tool.search(fallback_q, max_results=max_results)
+                items = self.web_search_tool.search(fallback_q, max_results=max_results, fresh=False)
                 for item in items:
                     url = (item.get("url") or "").strip()
                     if url and url not in seen_urls:
@@ -541,6 +580,7 @@ class ChatService:
             except Exception as exc:
                 logger.warning("web_search_fallback_failed error=%s", exc)
 
+        logger.info("web_search_complete fresh=%s source_count=%d", fresh, len(merged))
         return self._rank_web_results(merged, question)
 
     def _trim_history(self, history: list[dict], max_messages: int = 16, max_chars: int = 12000) -> list[dict]:
@@ -1254,7 +1294,8 @@ class ChatService:
             )
             answer = self.llm.chat(messages=regen_msgs, model=model)
 
-        if self._is_current_events_query(question) and self._looks_stale_current_answer(answer):
+        if (self._is_current_events_query(question) or self._needs_sports_context(question)) and self._looks_stale_current_answer(answer):
+            logger.info("stale_answer_detected question=%r — rerunning with web context", question[:100])
             has_live_signal = bool(web_results) or bool(market_context.strip()) or bool(news_context.strip()) or bool(
                 weather_context.strip()
             )
@@ -1269,10 +1310,11 @@ class ChatService:
                             "role": "user",
                             "content": (
                                 f"{runtime_context}"
+                                f"{web_context}"
                                 f"{profile_context}"
                                 f"Question: {question}\n\n"
-                                "Give a useful best-effort answer without claiming live retrieval is unavailable. "
-                                "Be explicit about uncertainty, but still answer directly."
+                                "Give a useful best-effort answer. Use any live context provided above. "
+                                "Be explicit about uncertainty but still answer directly."
                             ),
                         }
                     )
@@ -1288,10 +1330,11 @@ class ChatService:
                             f"{weather_context}"
                             f"{market_context}"
                             f"{news_context}"
+                            f"{web_context}"
                             f"{profile_context}"
                             f"Question: {question}\n\n"
-                            "Rewrite your answer using available live context only. "
-                            "Do not mention training cutoff dates."
+                            "Rewrite your answer using the LIVE WEB RESULTS above as the primary source. "
+                            "Do not use training memory for current facts. Do not mention training cutoff dates."
                         ),
                     }
                 )
@@ -1372,20 +1415,21 @@ class ChatService:
             regen.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+web_ctx+profile_ctx+(uploaded_file_context or "")+"Question: "+question+"\n\nGive a direct, concrete, useful answer. Do not say you cannot access real-time or live data. Use live context above if available. Otherwise use general knowledge and note uncertainty briefly."})
             answer = self.llm.chat(messages=regen, model=model)
             yield ("replace", answer)
-        if self._is_current_events_query(question) and self._looks_stale_current_answer(answer):
+        if (self._is_current_events_query(question) or self._needs_sports_context(question)) and self._looks_stale_current_answer(answer):
+            logger.info("stale_answer_detected_stream question=%r — rerunning with web context", question[:100])
             if not live:
                 if self._needs_market_context(question):
                     answer = self._market_answer_fallback(market_context=market_ctx, web_results=web_results)
                 else:
                     sf = [{"role": "system", "content": SYSTEM_PROMPT}]
                     sf.extend(self._trim_history(eff_h))
-                    sf.append({"role": "user", "content": runtime_ctx+profile_ctx+"Question: "+question+"\n\nGive a useful best-effort answer without claiming live retrieval is unavailable. Be explicit about uncertainty, but still answer directly."})
+                    sf.append({"role": "user", "content": runtime_ctx+web_ctx+profile_ctx+"Question: "+question+"\n\nGive a useful best-effort answer. Use any live context provided above. Be explicit about uncertainty but still answer directly."})
                     answer = self.llm.chat(messages=sf, model=model)
                 yield ("replace", answer)
             else:
                 sf = [{"role": "system", "content": SYSTEM_PROMPT}]
                 sf.extend(self._trim_history(eff_h))
-                sf.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+profile_ctx+"Question: "+question+"\n\nRewrite your answer using available live context only. Do not mention training cutoff dates."})
+                sf.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+web_ctx+profile_ctx+"Question: "+question+"\n\nRewrite your answer using the LIVE WEB RESULTS above as the primary source. Do not use training memory for current facts. Do not mention training cutoff dates."})
                 answer = self.llm.chat(messages=sf, model=model)
                 yield ("replace", answer)
         if self._needs_market_context(question):
