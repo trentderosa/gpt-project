@@ -14,7 +14,10 @@ class DisabledWebSearchTool(WebSearchTool):
 class DuckDuckGoSearchTool(WebSearchTool):
     def search(self, query: str, max_results: int = 3, fresh: bool = False) -> list[dict]:
         try:
-            from duckduckgo_search import DDGS
+            try:
+                from ddgs import DDGS
+            except ImportError:
+                from duckduckgo_search import DDGS
         except Exception:
             return []
 

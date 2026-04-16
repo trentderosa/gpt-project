@@ -253,6 +253,12 @@ STALE_ANSWER_HINTS = {
     "i don't have the latest specific",
     "i don't have access to real-time",
     "i cannot access real-time",
+    # Known stale leadership facts that signal a 2023-era answer
+    "emmett shear",         # OpenAI interim CEO for ~4 days in Nov 2023
+    "mira murati",          # OpenAI interim CEO briefly in Nov 2023
+    "bob chapek",           # Disney CEO fired Nov 2022
+    "adam neumann",         # WeWork CEO 2019
+    "jack dorsey",          # Twitter CEO, left 2021
 }
 
 NAME_PATTERNS = [
@@ -373,6 +379,16 @@ class ChatService:
             return True
         return bool(_WEB_EXEMPT_RE.search(q))
 
+    # Regex matching major recurring sports championship events.
+    _SPORTS_EVENT_RE = re.compile(
+        r'\b(?:super bowl|world series|stanley cup|march madness|nba finals?|world cup(?! of)|'
+        r'masters(?:\s+(?:tournament|golf))?|pga championship|us open|british open|the open|'
+        r'wimbledon|us open tennis|french open|roland garros|australian open|'
+        r'olympic games?|olympics?|nfl draft|nba draft|'
+        r'ncaa championship|college football playoff|rose bowl|orange bowl|sugar bowl|fiesta bowl)\b',
+        re.IGNORECASE,
+    )
+
     def _classify_query(self, question: str) -> str:
         """Return a category label for logging and routing. First match wins."""
         q = question.lower()
@@ -380,7 +396,7 @@ class ChatService:
             return "weather"
         if self._needs_market_context(question):
             return "finance"
-        if re.search(r'\b(?:super bowl|world series|stanley cup|march madness|nba finals|world cup final)\b', q):
+        if self._SPORTS_EVENT_RE.search(q):
             return "sports_event"
         if self._needs_sports_context(question):
             return "sports"
@@ -406,25 +422,61 @@ class ChatService:
         # Build a stronger primary query for known factual patterns.
         primary = query
 
-        # Major sports event: super bowl, world series, stanley cup, etc.
+        # Major sports event: super bowl, world series, stanley cup, masters, etc.
+        # IMPORTANT: Never use "who won X" as-is — "won" is also the Korean currency (KRW/Won),
+        # which causes search engines to return currency exchange results.
+        # Always rewrite to "{EventName} {year} winner champion" form.
         if category == "sports_event":
-            primary = f"{clean} {year} winner champion result"
+            # Extract the canonical event name from the query.
+            event_m = self._SPORTS_EVENT_RE.search(q_lower)
+            if event_m:
+                event_name = event_m.group(0).title()
+                # Use "recap" and "score" to get game result articles, not landing/schedule pages.
+                primary = f"{event_name} {year} winner champion score recap"
+            else:
+                stripped = re.sub(r'^(?:who won(?: the)?|who is winning|winner of|champions? of)\s+', '', clean, flags=re.IGNORECASE).strip()
+                primary = f"{stripped} {year} winner champion score recap"
 
         # Sports: scores, records, standings, game results.
+        # Add sport/league context to disambiguate team names ("Washington" → could be many things)
         elif category == "sports":
-            primary = f"{clean} {year} latest score result standings"
+            # Detect and name the sport to avoid ambiguous team-name matches
+            sport_hint = ""
+            if re.search(r'\b(?:nba|basketball|lakers?|celtics?|nets?|knicks?|bulls?|heat|bucks?|nuggets?|suns?|warriors?|spurs?|raptors?|wizards?|magic|hawks?|hornets?|pistons?|pacers?|cavs?|cavaliers?|thunder|blazers?|timberwolves?|pelicans?|grizzlies?|jazz|clippers?|mavs?|mavericks?)\b', q_lower):
+                sport_hint = "NBA"
+            elif re.search(r'\b(?:nfl|football|chiefs?|eagles?|cowboys?|patriots?|ravens?|steelers?|packers?|bears?|lions?|49ers?|rams?|seahawks?|broncos?|chargers?|raiders?|dolphins?|bills?|jets?|texans?|colts?|jaguars?|titans?|bengals?|browns?|giants?|commanders?|cardinals?|saints?|panthers?|falcons?|buccaneers?|vikings?|bears?)\b', q_lower):
+                sport_hint = "NFL"
+            elif re.search(r'\b(?:mlb|baseball|yankees?|red sox|dodgers?|giants?|mets?|cubs?|astros?|braves?|padres?|phillies?|cardinals?|pirates?|reds?|royals?|brewers?|twins?|tigers?|white sox|guardians?|rockies?|mariners?|athletics?|rangers?|orioles?|blue jays?|rays?|angels?|nationals?)\b', q_lower):
+                sport_hint = "MLB"
+            elif re.search(r'\b(?:nhl|hockey|rangers?|bruins?|penguins?|capitals?|lightning|blackhawks?|maple leafs?|canadiens?|avalanche|knights?|oilers?|canucks?|flames?|jets?|coyotes?|predators?|blues?|red wings?|sabres?|hurricanes?|blue jackets?|wild|stars?|ducks?|kings?|sharks?|devils?|islanders?|senators?)\b', q_lower):
+                sport_hint = "NHL"
+            if sport_hint:
+                primary = f"{clean} {sport_hint} {year} record standings"
+            else:
+                primary = f"{clean} {year} latest score result standings"
 
-        # Sports winner/result: "who won the masters", "who won the super bowl", etc.
+        # Sports winner/result for non-major-events: strip "who won" to avoid KRW issue.
         elif re.search(r'\b(?:who won|who is winning|who will win|winner of|champions? of|results? of)\b', q_lower):
-            primary = f"{clean} {year} winner result"
+            stripped = re.sub(r'^(?:who won(?: the)?|who is winning|winner of|champions? of)\s+', '', clean, flags=re.IGNORECASE).strip()
+            primary = f"{stripped} {year} winner result"
 
         # Leadership queries: "who is the CEO of X", "CEO of OpenAI", etc.
+        # Use "CEO X" direct form instead of "who is the CEO of X" — cleaner signal for search.
         elif category == "leadership":
-            primary = f"{clean} {year} current appointed"
+            # Extract the org/person from "who is the CEO of X" patterns
+            ceo_match = re.search(r'\b(?:ceo|president|cfo|cto|head|founder)\s+(?:of\s+)?([A-Za-z0-9 &.,\-]{2,50})', clean, re.IGNORECASE)
+            org = ceo_match.group(1).strip() if ceo_match else clean
+            primary = f"{org} CEO current {year}"
 
         # Weather: let web search results carry the answer when no location coords are available.
         elif category == "weather":
-            primary = f"{clean} forecast now"
+            # Extract location cleanly — strip trailing time words so geocoding gets a clean city name.
+            loc_match = re.search(r'\b(?:weather|forecast|temperature)\s+(?:in|for|at)\s+([A-Za-z ,.\-]+?)(?:\s+(?:today|tonight|now|this week|tomorrow|right now))?\s*$', clean, re.IGNORECASE)
+            if loc_match:
+                loc = loc_match.group(1).strip()
+                primary = f"weather {loc} today forecast temperature"
+            else:
+                primary = f"{clean} weather forecast today"
 
         # "Latest news on X" or "what happened with X"
         elif re.search(r'\b(?:latest news|what happened|news about|update on|updates on)\b', q_lower):
@@ -877,16 +929,22 @@ class ChatService:
         q = (question or "").strip()
         if not q:
             return None
+        # Strip trailing time qualifiers before matching location.
+        q_clean = re.sub(r'\s+(?:today|tonight|now|right now|this week|this morning|this afternoon|tomorrow|currently)\s*$', '', q, flags=re.IGNORECASE).strip()
         patterns = [
-            re.compile(r"\b(?:weather|temp(?:erature)?)\s+(?:in|for|at)\s+([A-Za-z0-9.,\-\s]{2,80})\??$", re.IGNORECASE),
+            re.compile(r"\b(?:weather|temp(?:erature)?|forecast)\s+(?:in|for|at)\s+([A-Za-z0-9.,\-\s]{2,80?}?)(?:\s+(?:today|tonight|now|right now|this week|tomorrow))?\s*$", re.IGNORECASE),
+            re.compile(r"\b(?:weather|temp(?:erature)?|forecast)\s+(?:in|for|at)\s+([A-Za-z0-9.,\-\s]{2,80})\s*$", re.IGNORECASE),
             re.compile(r"\bin\s+([A-Za-z0-9.,\-\s]{2,80})\s*$", re.IGNORECASE),
         ]
         for pattern in patterns:
-            match = pattern.search(q)
-            if match:
-                location = match.group(1).strip(" .,!?:;")
-                if len(location) >= 2:
-                    return location
+            for candidate in (q_clean, q):
+                match = pattern.search(candidate)
+                if match:
+                    location = match.group(1).strip(" .,!?:;")
+                    # Strip any trailing time qualifiers that slipped through
+                    location = re.sub(r'\s+(?:today|tonight|now|right now|this week|this morning|this afternoon|tomorrow|currently)\s*$', '', location, flags=re.IGNORECASE).strip(" .,!?:;")
+                    if len(location) >= 2:
+                        return location
         return None
 
     def _geocode_location(self, location_text: str) -> tuple[float, float] | None:
@@ -977,30 +1035,55 @@ class ChatService:
             logger.warning("weather_api_failed lat=%s lon=%s", lat, lon)
             return ""
 
+    # Company name → ticker mapping for when users type full company names instead of tickers.
+    _COMPANY_TO_TICKER: dict[str, str] = {
+        "nvidia": "NVDA",
+        "apple": "AAPL",
+        "microsoft": "MSFT",
+        "tesla": "TSLA",
+        "amazon": "AMZN",
+        "google": "GOOGL",
+        "alphabet": "GOOGL",
+        "meta": "META",
+        "netflix": "NFLX",
+        "paypal": "PYPL",
+        "salesforce": "CRM",
+        "amd": "AMD",
+        "intel": "INTC",
+        "qualcomm": "QCOM",
+        "broadcom": "AVGO",
+        "arm": "ARM",
+        "palantir": "PLTR",
+        "coinbase": "COIN",
+        "berkshire": "BRK",
+        "jpmorgan": "JPM",
+        "jp morgan": "JPM",
+        "goldman sachs": "GS",
+        "bank of america": "BAC",
+        "s&p 500": "SPY",
+        "s&p500": "SPY",
+        "dow jones": "DIA",
+        "nasdaq": "QQQ",
+    }
+
     def _extract_symbols_from_question(self, question: str) -> list[str]:
-        # Pick uppercase ticker-style tokens, $-prefixed symbols, and common lowercase ticker mentions.
+        """Pick uppercase ticker-style tokens, $-prefixed symbols, common tickers, and company names."""
         dollar_tokens = [m.upper() for m in re.findall(r"\$([A-Za-z]{1,5})\b", question)]
         candidates = re.findall(r"\b[A-Z]{1,5}\b", question)
         lowered = question.lower()
         common = [
-            "spy",
-            "qqq",
-            "dia",
-            "iwm",
-            "aapl",
-            "msft",
-            "nvda",
-            "tsla",
-            "amzn",
-            "meta",
-            "googl",
-            "gspc",
-            "dji",
-            "ixic",
+            "spy", "qqq", "dia", "iwm", "aapl", "msft", "nvda", "tsla",
+            "amzn", "meta", "googl", "gspc", "dji", "ixic", "amd", "intc",
+            "arm", "pltr", "nflx", "coin",
         ]
         common_hits = [sym.upper() for sym in common if re.search(rf"\b{re.escape(sym)}\b", lowered)]
+        # Company name → ticker mappings
+        company_hits = []
+        for name, ticker in self._COMPANY_TO_TICKER.items():
+            if name in lowered:
+                company_hits.append(ticker)
         deny = {"I", "A", "AN", "THE", "AND", "OR", "IT", "WE", "YOU"}
-        symbols = [c for c in dollar_tokens + candidates + common_hits if c not in deny]
+        symbols = [c for c in dollar_tokens + candidates + common_hits + company_hits if c not in deny]
         deduped: list[str] = []
         seen: set[str] = set()
         for symbol in symbols:
@@ -1008,8 +1091,7 @@ class ChatService:
                 continue
             seen.add(symbol)
             deduped.append(symbol)
-        symbols = deduped
-        return symbols[:8]
+        return deduped[:8]
 
     def _live_market_context(self, question: str) -> str:
         default_symbols = ["SPY", "QQQ", "DIA", "IWM", "AAPL", "MSFT", "NVDA", "TSLA", "GSPC", "DJI", "IXIC"]
@@ -1144,20 +1226,39 @@ class ChatService:
             return ""
         return "\n".join(lines) + "\n\n"
 
-    def _extract_market_lines(self, market_context: str) -> list[str]:
-        lines = []
+    def _extract_market_lines(self, market_context: str, prefer_symbols: list[str] | None = None) -> list[str]:
+        """Return market data lines from context, with requested symbols surfaced first."""
+        all_lines = []
         for line in (market_context or "").splitlines():
             clean = line.strip()
             if clean.startswith("- ") and ("price=" in clean or "close=" in clean):
-                lines.append(clean)
-        return lines[:5]
+                all_lines.append(clean)
+        if not prefer_symbols or not all_lines:
+            return all_lines[:5]
+        # Partition: requested symbols first, then the rest.
+        wanted = [ln for ln in all_lines if any(sym.upper() in ln.upper() for sym in prefer_symbols)]
+        others = [ln for ln in all_lines if ln not in wanted]
+        return (wanted + others)[:5]
 
     def _answer_contains_market_snapshot(self, answer: str) -> bool:
         text = (answer or "").lower()
-        return "latest market snapshot" in text or bool(re.search(r"\b[a-z0-9\^]{1,6}\s*:\s*(price|close)\s*=", text))
+        # Match ticker:close= format (from our market context lines)
+        if "latest market snapshot" in text:
+            return True
+        if re.search(r"\b[a-z0-9\^]{1,6}\s*:\s*(price|close)\s*=", text):
+            return True
+        # Also match prose price mentions: "$197.92", "197.92 per share", "trading at 197", etc.
+        if re.search(r"\$[\d,]+\.?\d{0,2}\b", text):
+            return True
+        if re.search(r"\btrading\s+at\s+[\d,]+\.?\d{0,2}\b", text):
+            return True
+        if re.search(r"\bprice\s+(?:is|of|at|:)\s+\$?[\d,]+\.?\d{0,2}\b", text):
+            return True
+        return False
 
-    def _market_answer_fallback(self, market_context: str, web_results: list[dict]) -> str:
-        market_lines = self._extract_market_lines(market_context)
+    def _market_answer_fallback(self, market_context: str, web_results: list[dict], question: str = "") -> str:
+        requested = self._extract_symbols_from_question(question) if question else []
+        market_lines = self._extract_market_lines(market_context, prefer_symbols=requested)
         if market_lines:
             body = "\n".join(market_lines[:4])
             return f"Here is the latest market snapshot I found:\n{body}\n\nAsk for a specific ticker if you want a deeper breakdown."
@@ -1357,7 +1458,7 @@ class ChatService:
             )
             if not has_live_signal:
                 if self._needs_market_context(question):
-                    answer = self._market_answer_fallback(market_context=market_context, web_results=web_results)
+                    answer = self._market_answer_fallback(market_context=market_context, web_results=web_results, question=question)
                 else:
                     stale_fix_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
                     stale_fix_messages.extend(self._trim_history(effective_history))
@@ -1397,7 +1498,7 @@ class ChatService:
                 answer = self.llm.chat(messages=stale_fix_messages, model=model)
 
         if self._needs_market_context(question):
-            forced = self._market_answer_fallback(market_context=market_context, web_results=web_results)
+            forced = self._market_answer_fallback(market_context=market_context, web_results=web_results, question=question)
             if forced and (self._looks_like_market_deflection(answer) or not self._answer_contains_market_snapshot(answer)):
                 answer = forced
 
@@ -1482,7 +1583,7 @@ class ChatService:
             logger.info("stale_answer_detected_stream question=%r — rerunning with web context", question[:100])
             if not live:
                 if self._needs_market_context(question):
-                    answer = self._market_answer_fallback(market_context=market_ctx, web_results=web_results)
+                    answer = self._market_answer_fallback(market_context=market_ctx, web_results=web_results, question=question)
                 else:
                     sf = [{"role": "system", "content": SYSTEM_PROMPT}]
                     sf.extend(self._trim_history(eff_h))
@@ -1496,7 +1597,7 @@ class ChatService:
                 answer = self.llm.chat(messages=sf, model=model)
                 yield ("replace", answer)
         if self._needs_market_context(question):
-            forced = self._market_answer_fallback(market_context=market_ctx, web_results=web_results)
+            forced = self._market_answer_fallback(market_context=market_ctx, web_results=web_results, question=question)
             if forced and (self._looks_like_market_deflection(answer) or not self._answer_contains_market_snapshot(answer)):
                 answer = forced
                 yield ("replace", answer)
