@@ -240,8 +240,10 @@ STALE_ANSWER_HINTS = {
     "as of late 2023",
     "as of early 2024",
     "as of 2024",
+    "as of late 2024",
     "as of early 2025",
     "as of 2025",
+    "as of late 2025",
     "as of my last update",
     "up to my last training",
     "based on my training",
@@ -416,6 +418,15 @@ class ChatService:
         r'|\bprice\s+(?:is|of|at|:)\s+\$?[\d,]+\.?\d{0,2}\b',
     )
 
+    # Macro-finance queries (interest rates, Fed, inflation) — classified as finance but
+    # do NOT trigger the stock market API (_live_market_context). Web search only.
+    _MACRO_FINANCE_RE = re.compile(
+        r'\b(?:interest rates?|fed rate|federal funds|fed funds|fomc|'
+        r'treasury yield|bond yield|mortgage rate|prime rate|inflation rate|'
+        r'federal reserve rate|benchmark rate|central bank rate)\b',
+        re.IGNORECASE,
+    )
+
     # Categories that always require fresh live data regardless of time keywords.
     _FRESHNESS_ALWAYS_CATEGORIES: frozenset = frozenset({
         "weather", "finance", "sports_event", "sports", "leadership", "news", "current_events",
@@ -432,7 +443,7 @@ class ChatService:
         q = question.lower()
         if self._needs_weather_context(question):
             return "weather"
-        if self._needs_market_context(question):
+        if self._needs_market_context(question) or self._MACRO_FINANCE_RE.search(question):
             return "finance"
         if self._SPORTS_EVENT_RE.search(q):
             return "sports_event"
@@ -479,17 +490,21 @@ class ChatService:
         # Sports: scores, records, standings, game results.
         # Add sport/league context to disambiguate team names ("Washington" → could be many things)
         elif category == "sports":
-            # Detect and name the sport to avoid ambiguous team-name matches
+            # Detect league from keywords in the query.
             sport_hint = ""
             if re.search(r'\b(?:nba|basketball|lakers?|celtics?|nets?|knicks?|bulls?|heat|bucks?|nuggets?|suns?|warriors?|spurs?|raptors?|wizards?|magic|hawks?|hornets?|pistons?|pacers?|cavs?|cavaliers?|thunder|blazers?|timberwolves?|pelicans?|grizzlies?|jazz|clippers?|mavs?|mavericks?)\b', q_lower):
                 sport_hint = "NBA"
-            elif re.search(r'\b(?:nfl|football|chiefs?|eagles?|cowboys?|patriots?|ravens?|steelers?|packers?|bears?|lions?|49ers?|rams?|seahawks?|broncos?|chargers?|raiders?|dolphins?|bills?|jets?|texans?|colts?|jaguars?|titans?|bengals?|browns?|giants?|commanders?|cardinals?|saints?|panthers?|falcons?|buccaneers?|vikings?|bears?)\b', q_lower):
+            elif re.search(r'\b(?:nfl|football|chiefs?|eagles?|cowboys?|patriots?|ravens?|steelers?|packers?|bears?|lions?|49ers?|rams?|seahawks?|broncos?|chargers?|raiders?|dolphins?|bills?|jets?|texans?|colts?|jaguars?|titans?|bengals?|browns?|giants?|commanders?|cardinals?|saints?|panthers?|falcons?|buccaneers?|vikings?)\b', q_lower):
                 sport_hint = "NFL"
             elif re.search(r'\b(?:mlb|baseball|yankees?|red sox|dodgers?|giants?|mets?|cubs?|astros?|braves?|padres?|phillies?|cardinals?|pirates?|reds?|royals?|brewers?|twins?|tigers?|white sox|guardians?|rockies?|mariners?|athletics?|rangers?|orioles?|blue jays?|rays?|angels?|nationals?)\b', q_lower):
                 sport_hint = "MLB"
             elif re.search(r'\b(?:nhl|hockey|rangers?|bruins?|penguins?|capitals?|lightning|blackhawks?|maple leafs?|canadiens?|avalanche|knights?|oilers?|canucks?|flames?|jets?|coyotes?|predators?|blues?|red wings?|sabres?|hurricanes?|blue jackets?|wild|stars?|ducks?|kings?|sharks?|devils?|islanders?|senators?)\b', q_lower):
                 sport_hint = "NHL"
-            if sport_hint:
+            # "Best team", "top team", "number one team" → standings query.
+            if re.search(r'\b(?:best|top|number\s*one|#\s*1|ranked?)\s+team\b', q_lower):
+                league = sport_hint or "NBA"
+                primary = f"{league} standings top team best record {year}"
+            elif sport_hint:
                 primary = f"{clean} {sport_hint} {year} record standings"
             else:
                 primary = f"{clean} {year} latest score result standings"
@@ -528,14 +543,15 @@ class ChatService:
         queries = [primary]
 
         # Add year-anchored and "latest" variants for freshness-sensitive categories or rewritten queries.
+        # Exception: sports_event queries have year already embedded in the rewritten primary —
+        # never append raw "{query} {year}" because that re-introduces "who won X" → KRW risk.
         needs_variants = (category in self._FRESHNESS_ALWAYS_CATEGORIES) or (primary != query)
-        if needs_variants:
+        if needs_variants and category != "sports_event":
             year_query = f"{query} {year}"
             if year_query.lower().strip() != primary.lower().strip():
                 queries.append(year_query)
-            # Skip "latest {query}" for sports_event — we have a strong rewritten primary already,
-            # and "latest who won X" can trigger Korean Won (KRW) disambiguation in search engines.
-            if category != "sports_event":
+            # Skip "latest {query}" if query already starts with "latest" (avoid "latest latest …").
+            if not q_lower.startswith("latest "):
                 latest_query = f"latest {query}"
                 normed = {q.strip().lower() for q in queries}
                 if latest_query.lower().strip() not in normed:
@@ -566,19 +582,8 @@ class ChatService:
             ]
         ).lower()
         finance_tokens = {
-            "stock",
-            "market",
-            "s&p",
-            "nasdaq",
-            "dow",
-            "index",
-            "shares",
-            "equity",
-            "finance",
-            "invest",
-            "spy",
-            "qqq",
-            "dia",
+            "stock", "market", "s&p", "nasdaq", "dow", "index", "shares",
+            "equity", "finance", "invest", "spy", "qqq", "dia",
         }
         return any(token in text for token in finance_tokens)
 
@@ -636,6 +641,25 @@ class ChatService:
             "Never say you cannot retrieve live data.\n"
         )
         return "\n".join(lines) + "\n\n"
+
+    def _web_results_relevant(self, results: list[dict], category: str) -> bool:
+        """True if at least one result contains topic-relevant content for the given category.
+        Used to detect when a search returned homepage/aggregate results with no useful snippets.
+        """
+        if not results:
+            return False
+        if category in ("sports", "sports_event"):
+            sports_kw = {
+                "nba", "nfl", "nhl", "mlb", "game", "score", "standings", "points",
+                "team", "season", "playoffs", "championship", "record", "wins", "losses",
+                "defeated", "beat", "won the", "tournament", "cup", "bowl", "series",
+            }
+            for item in results:
+                text = (str(item.get("snippet", "")) + " " + str(item.get("title", ""))).lower()
+                if any(kw in text for kw in sports_kw):
+                    return True
+            return False
+        return True
 
     def _search_live_web(self, question: str, max_results: int = 5, category: str | None = None, is_fresh: bool | None = None) -> list[dict]:
         merged: list[dict] = []
@@ -1403,10 +1427,26 @@ class ChatService:
             if topic_news:
                 news_context += topic_news
         web_context = self._build_web_context_block(web_results)
+        # For sports queries where DuckDuckGo returned only generic news homepages (no sports
+        # content in snippets), fall back to Google News RSS for topic-specific headlines.
+        if category in ("sports", "sports_event") and web_results and not self._web_results_relevant(web_results, category):
+            logger.info("web_results_irrelevant_sports_fallback category=%s", category)
+            topic_sports = self._topic_news_context(question)
+            if topic_sports:
+                news_context = (news_context + topic_sports) if news_context else topic_sports
+            web_results = []  # discard useless homepage results
+
         note_context_block = self._build_note_context_block(context, question, category, is_fresh, web_results)
-        has_live_signal = bool(web_results) or bool(market_context.strip()) or bool(news_context.strip()) or bool(weather_context.strip())
+        # has_live_signal: only count web_results as live signal if they're topically relevant.
+        has_live_signal = (bool(web_results) and self._web_results_relevant(web_results, category)) or bool(market_context.strip()) or bool(news_context.strip()) or bool(weather_context.strip())
         anti_refusal = "" if has_strong_note_context else "Instruction: If local notes do not cover this, answer from general knowledge.\n\n"
         anti_stale = "Instruction: Use the live context provided above. Do not reference training cutoff dates.\n\n" if is_fresh and has_live_signal else ""
+        # When live search ran but returned nothing useful, the model must still commit to a concrete answer.
+        no_live_push = (
+            "Instruction: Live web search ran but returned no results for this query. "
+            "Give your best-effort answer using general knowledge — state a concrete answer even if you must note it may not reflect the very latest data. "
+            "Do not say you cannot provide the information or tell the user to check elsewhere without first giving a direct answer.\n\n"
+        ) if is_fresh and _effective_web and not has_live_signal else ""
 
         messages.append(
             {
@@ -1422,6 +1462,7 @@ class ChatService:
                     f"{note_context_block}"
                     f"{anti_refusal}"
                     f"{anti_stale}"
+                    f"{no_live_push}"
                     f"User question:\n{question}"
                 ),
             }
@@ -1569,12 +1610,23 @@ class ChatService:
             tn = self._topic_news_context(question)
             if tn:
                 news_ctx += tn
+        if s_category in ("sports", "sports_event") and web_results and not self._web_results_relevant(web_results, s_category):
+            logger.info("web_results_irrelevant_sports_fallback_stream category=%s", s_category)
+            tn = self._topic_news_context(question)
+            if tn:
+                news_ctx = (news_ctx + tn) if news_ctx else tn
+            web_results = []
         web_ctx = self._build_web_context_block(web_results)
         note_blk = self._build_note_context_block(context, question, s_category, s_fresh, web_results)
-        live = bool(web_results) or bool(market_ctx.strip()) or bool(news_ctx.strip()) or bool(weather_ctx.strip())
+        live = (bool(web_results) and self._web_results_relevant(web_results, s_category)) or bool(market_ctx.strip()) or bool(news_ctx.strip()) or bool(weather_ctx.strip())
         anti_r = "" if has_strong else "Instruction: If local notes do not cover this, answer from general knowledge.\n\n"
         anti_s = ("Instruction: Use the live context provided above. Do not reference training cutoff dates.\n\n" if s_fresh and live else "")
-        messages.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+web_ctx+profile_ctx+(uploaded_file_context or "")+note_blk+anti_r+anti_s+"User question:\n"+question})
+        no_live_push_s = (
+            "Instruction: Live web search ran but returned no results for this query. "
+            "Give your best-effort answer using general knowledge — state a concrete answer even if you must note it may not reflect the very latest data. "
+            "Do not say you cannot provide the information or tell the user to check elsewhere without first giving a direct answer.\n\n"
+        ) if s_fresh and _effective_web and not live else ""
+        messages.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+web_ctx+profile_ctx+(uploaded_file_context or "")+note_blk+anti_r+anti_s+no_live_push_s+"User question:\n"+question})
         streamed = []
         try:
             for token in self.llm.chat_stream(messages=messages, model=model):

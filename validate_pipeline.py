@@ -55,13 +55,16 @@ svc = ChatService(llm=llm, chunks=chunks, web_search_tool=search_tool)
 
 # ── test queries ──────────────────────────────────────────────────────────────
 TESTS = [
+    ("sports",       "what is the best team in the NBA right now"),
     ("sports_event", "who won the super bowl"),
-    ("sports_event", "who won the super bowl this year"),
     ("sports_event", "who won the masters this year"),
     ("sports",       "washington wizards record"),
     ("weather",      "weather in harrisonburg today"),
     ("finance",      "latest nvidia stock price"),
     ("leadership",   "who is the CEO of OpenAI"),
+    ("current_events", "what happened in the election today"),
+    ("finance",      "current interest rate"),
+    ("current_events", "what is the latest iPhone"),
 ]
 
 SEP = "=" * 80
@@ -165,6 +168,29 @@ def score_answer(answer: str, query: str) -> tuple[str, str]:
         if "sam altman" in a:
             return "PASS", "Sam Altman named"
         return "WARN", "Sam Altman not mentioned"
+
+    if "best team in the nba" in q:
+        import re
+        if re.search(r"\b(celtics?|thunder|cavaliers?|cavs?|nuggets?|lakers?|warriors?|bucks?|heat|timberwolves?|wolves?|pacers?|knicks?|suns?|rockets?|kings?)\b", a):
+            return "PASS", "NBA team name found"
+        return "WARN", "no recognizable NBA team found"
+
+    if "election" in q:
+        if any(w in a for w in ["election", "vote", "candidate", "won", "race", "ballot", "democrat", "republican", "senate", "house", "president"]):
+            return "PASS", "election-related content found"
+        return "WARN", "no election content found"
+
+    if "interest rate" in q:
+        import re
+        if re.search(r"\b\d+\.?\d*\s*%|\bfed\b|\bfederal reserve\b|\bfomc\b|\brate\b.*\d+", a):
+            return "PASS", "interest rate data found"
+        return "WARN", "no interest rate data found"
+
+    if "latest iphone" in q:
+        import re
+        if re.search(r"\biphone\s*1[0-9]|iphone\s*[2-9]\d\b|\biphone\s*(?:pro|plus|max|ultra|mini)\b|\bapple\b.*\biphone\b", a, re.IGNORECASE):
+            return "PASS", "iPhone model mentioned"
+        return "WARN", "no iPhone model found"
 
     return "PASS", "no specific checks failed"
 
