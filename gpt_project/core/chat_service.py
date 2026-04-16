@@ -373,6 +373,25 @@ class ChatService:
             return True
         return bool(_WEB_EXEMPT_RE.search(q))
 
+    def _classify_query(self, question: str) -> str:
+        """Return a category label for logging and routing. First match wins."""
+        q = question.lower()
+        if self._needs_weather_context(question):
+            return "weather"
+        if self._needs_market_context(question):
+            return "finance"
+        if re.search(r'\b(?:super bowl|world series|stanley cup|march madness|nba finals|world cup final)\b', q):
+            return "sports_event"
+        if self._needs_sports_context(question):
+            return "sports"
+        if re.search(r'\b(?:ceo|president|cfo|cto|head of|founder of|who (?:runs|leads|is the (?:ceo|president|head|chief)))\b', q):
+            return "leadership"
+        if self._needs_news_context(question):
+            return "news"
+        if self._is_current_events_query(question):
+            return "current_events"
+        return "general"
+
     def _web_queries(self, question: str) -> list[str]:
         query = question.strip()
         if not query:
@@ -380,12 +399,19 @@ class ChatService:
         q_lower = query.lower()
         year = datetime.now().year
         clean = re.sub(r'[?!]+$', '', query).strip()
+        category = self._classify_query(query)
+
+        logger.info("query_classified category=%s question=%r", category, query[:100])
 
         # Build a stronger primary query for known factual patterns.
         primary = query
 
+        # Major sports event: super bowl, world series, stanley cup, etc.
+        if category == "sports_event":
+            primary = f"{clean} {year} winner champion result"
+
         # Sports: scores, records, standings, game results.
-        if self._needs_sports_context(query):
+        elif category == "sports":
             primary = f"{clean} {year} latest score result standings"
 
         # Sports winner/result: "who won the masters", "who won the super bowl", etc.
@@ -393,8 +419,12 @@ class ChatService:
             primary = f"{clean} {year} winner result"
 
         # Leadership queries: "who is the CEO of X", "CEO of OpenAI", etc.
-        elif re.search(r'\b(?:ceo|president|cfo|cto|head of|founder of|who (?:runs|leads|is the (?:ceo|president|head|chief)))\b', q_lower):
-            primary = f"{clean} {year} current"
+        elif category == "leadership":
+            primary = f"{clean} {year} current appointed"
+
+        # Weather: let web search results carry the answer when no location coords are available.
+        elif category == "weather":
+            primary = f"{clean} forecast now"
 
         # "Latest news on X" or "what happened with X"
         elif re.search(r'\b(?:latest news|what happened|news about|update on|updates on)\b', q_lower):
@@ -405,7 +435,7 @@ class ChatService:
 
         queries = [primary]
 
-        # For current-event or rewritten factual queries, always add year-anchored + "latest" variants.
+        # For current-event or freshness-sensitive queries, always add year-anchored + "latest" variants.
         if self._is_current_events_query(query) or self._needs_sports_context(query) or primary != query:
             year_query = f"{query} {year}"
             if year_query.lower().strip() != primary.lower().strip():
@@ -1081,12 +1111,27 @@ class ChatService:
             )
         return "\n".join(lines) + "\n\n"
 
-    def _live_news_context(self) -> str:
+    def _live_news_context(self, max_age_hours: int = 12) -> str:
         rows = self.live_store.get_latest("news", limit=5)
         if not rows:
             return ""
+        now = datetime.now(timezone.utc)
         lines = ["Live news context (latest headlines):"]
+        any_fresh = False
         for row in rows[:5]:
+            # Skip rows whose created_at is older than max_age_hours.
+            created_at_raw = (row.get("created_at") or "").strip()
+            if created_at_raw:
+                try:
+                    created_at = datetime.fromisoformat(created_at_raw)
+                    if created_at.tzinfo is None:
+                        created_at = created_at.replace(tzinfo=timezone.utc)
+                    age_hours = (now - created_at).total_seconds() / 3600
+                    if age_hours > max_age_hours:
+                        logger.info("live_news_stale_skipped age_hours=%.1f", age_hours)
+                        continue
+                except Exception:
+                    pass  # If we can't parse the date, include it anyway
             payload = row.get("payload", {})
             items = payload.get("items", [])
             for item in items[:4]:
@@ -1094,6 +1139,9 @@ class ChatService:
                 link = (item.get("link") or "").strip()
                 pub_date = (item.get("pub_date") or "").strip()
                 lines.append(f"- {title} ({pub_date}) {link}")
+                any_fresh = True
+        if not any_fresh:
+            return ""
         return "\n".join(lines) + "\n\n"
 
     def _extract_market_lines(self, market_context: str) -> list[str]:
@@ -1174,6 +1222,10 @@ class ChatService:
                 self.history.append({"role": "assistant", "content": short_reply})
             return short_reply, [], [], updated_profile
 
+        category = self._classify_query(question)
+        is_fresh = self._is_freshness_sensitive(question)
+        logger.info("ask_start category=%s freshness_sensitive=%s question=%r", category, is_fresh, question[:100])
+
         hits = retrieve_context(question, self.chunks, top_k=TOP_K)
         has_strong_note_context = bool(hits and hits[0][0] >= MIN_SCORE)
         if has_strong_note_context:
@@ -1194,7 +1246,7 @@ class ChatService:
         profile_context = self._profile_context_block(updated_profile)
         messages.extend(self._trim_history(effective_history))
         runtime_context = ""
-        if self._needs_runtime_time_context(question) or self._is_current_events_query(question):
+        if self._needs_runtime_time_context(question) or self._is_current_events_query(question) or self._is_freshness_sensitive(question):
             runtime_context = (
                 self._runtime_time_context(
                     user_timezone=user_timezone,
@@ -1220,12 +1272,16 @@ class ChatService:
                 news_context += topic_news
         web_context = self._build_web_context_block(web_results)
         note_context_block = ""
-        if context:
+        # Suppress BM25 note context for freshness-sensitive queries when live web results exist.
+        # Local notes are static and can inject outdated facts that compete with live search results.
+        if context and not (self._is_freshness_sensitive(question) and web_results):
             note_context_block = f"Context from local notes:\n{context}\n\n"
+        elif context and self._is_freshness_sensitive(question) and web_results:
+            logger.info("notes_suppressed_freshness_sensitive category=%s web_results=%d", category, len(web_results))
 
         has_live_signal = bool(web_results) or bool(market_context.strip()) or bool(news_context.strip()) or bool(weather_context.strip())
         anti_refusal = "" if has_strong_note_context else "Instruction: If local notes do not cover this, answer from general knowledge.\n\n"
-        anti_stale = "Instruction: Use the live context provided above. Do not reference training cutoff dates.\n\n" if self._is_current_events_query(question) and has_live_signal else ""
+        anti_stale = "Instruction: Use the live context provided above. Do not reference training cutoff dates.\n\n" if self._is_freshness_sensitive(question) and has_live_signal else ""
 
         messages.append(
             {
@@ -1366,6 +1422,9 @@ class ChatService:
                 self.history.append({"role": "assistant", "content": short_reply})
             yield ("done", {"answer": short_reply, "hits": [], "web_results": [], "updated_profile": up})
             return
+        stream_category = self._classify_query(question)
+        stream_is_fresh = self._is_freshness_sensitive(question)
+        logger.info("ask_stream_start category=%s freshness_sensitive=%s question=%r", stream_category, stream_is_fresh, question[:100])
         hits = retrieve_context(question, self.chunks, top_k=TOP_K)
         has_strong = bool(hits and hits[0][0] >= MIN_SCORE)
         context = ("\n\n".join(f"[source={src} score={sc:.3f}]\n{txt}" for sc, src, txt in hits) if has_strong else "")
@@ -1376,7 +1435,7 @@ class ChatService:
         updated_profile = self._merge_user_profile(user_profile or {}, question, eff_h)
         profile_ctx = self._profile_context_block(updated_profile)
         messages.extend(self._trim_history(eff_h))
-        runtime_ctx = self._runtime_time_context(user_timezone=user_timezone, user_utc_offset_minutes=user_utc_offset_minutes, user_location_label=user_location_label) if (self._needs_runtime_time_context(question) or self._is_current_events_query(question)) else ""
+        runtime_ctx = self._runtime_time_context(user_timezone=user_timezone, user_utc_offset_minutes=user_utc_offset_minutes, user_location_label=user_location_label) if (self._needs_runtime_time_context(question) or self._is_current_events_query(question) or self._is_freshness_sensitive(question)) else ""
         weather_ctx = self._weather_context(user_location_label=user_location_label, user_timezone=user_timezone, question=question) if self._needs_weather_context(question) else ""
         market_ctx = self._live_market_context(question=question) if self._needs_market_context(question) else ""
         news_ctx = ""
@@ -1386,10 +1445,14 @@ class ChatService:
             if tn:
                 news_ctx += tn
         web_ctx = self._build_web_context_block(web_results)
-        note_blk = ("Context from local notes:\n" + context + "\n\n") if context else ""
+        # Suppress BM25 note context for freshness-sensitive queries when live web results exist.
+        _notes_suppressed = bool(context and self._is_freshness_sensitive(question) and web_results)
+        if _notes_suppressed:
+            logger.info("notes_suppressed_freshness_sensitive category=%s web_results=%d", stream_category, len(web_results))
+        note_blk = ("Context from local notes:\n" + context + "\n\n") if (context and not _notes_suppressed) else ""
         live = bool(web_results) or bool(market_ctx.strip()) or bool(news_ctx.strip()) or bool(weather_ctx.strip())
         anti_r = "" if has_strong else "Instruction: If local notes do not cover this, answer from general knowledge.\n\n"
-        anti_s = ("Instruction: Use the live context provided above. Do not reference training cutoff dates.\n\n" if self._is_current_events_query(question) and live else "")
+        anti_s = ("Instruction: Use the live context provided above. Do not reference training cutoff dates.\n\n" if self._is_freshness_sensitive(question) and live else "")
         messages.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+web_ctx+profile_ctx+(uploaded_file_context or "")+note_blk+anti_r+anti_s+"User question:\n"+question})
         streamed = []
         try:
