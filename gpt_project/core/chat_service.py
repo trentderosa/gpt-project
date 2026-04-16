@@ -350,15 +350,16 @@ class ChatService:
         q = question.lower()
         return any(hint in q for hint in SPORTS_QUERY_HINTS)
 
-    def _is_freshness_sensitive(self, question: str) -> bool:
+    def _is_freshness_sensitive(self, question: str, category: str | None = None) -> bool:
         """True for queries where only recent search results are trustworthy.
-        These queries bypass stale search content by requesting time-limited results.
+        All non-general categories are always freshness-sensitive; general queries
+        are sensitive only when they contain an explicit time reference.
         """
-        return (
-            self._is_current_events_query(question)
-            or self._needs_sports_context(question)
-            or bool(re.search(r'\b(202[5-9]|this year|right now|today|tonight|this week|this month)\b', question, re.IGNORECASE))
-        )
+        if category is None:
+            category = self._classify_query(question)
+        if category in self._FRESHNESS_ALWAYS_CATEGORIES:
+            return True
+        return bool(self._FRESHNESS_TIME_RE.search(question))
 
     def _is_web_search_exempt(self, question: str) -> bool:
         """Return True for queries where live web search adds no value:
@@ -413,6 +414,17 @@ class ChatService:
         r'|\$[\d,]+\.?\d{0,2}\b'
         r'|\btrading\s+at\s+[\d,]+\.?\d{0,2}\b'
         r'|\bprice\s+(?:is|of|at|:)\s+\$?[\d,]+\.?\d{0,2}\b',
+    )
+
+    # Categories that always require fresh live data regardless of time keywords.
+    _FRESHNESS_ALWAYS_CATEGORIES: frozenset = frozenset({
+        "weather", "finance", "sports_event", "sports", "leadership", "news", "current_events",
+    })
+
+    # Time-reference words that make any general query freshness-sensitive.
+    _FRESHNESS_TIME_RE = re.compile(
+        r'\b(?:202[5-9]|this year|right now|today|tonight|this week|this month)\b',
+        re.IGNORECASE,
     )
 
     def _classify_query(self, question: str) -> str:
@@ -487,12 +499,16 @@ class ChatService:
             stripped = re.sub(r'^(?:who won(?: the)?|who is winning|winner of|champions? of)\s+', '', clean, flags=re.IGNORECASE).strip()
             primary = f"{stripped} {year} winner result"
 
-        # Leadership queries: "who is the CEO of X", "CEO of OpenAI", etc.
-        # Direct "{Org} CEO current {year}" form produces better search results than "who is the CEO of X".
+        # Leadership queries: "who is the CEO of X", "who runs X", "CEO of OpenAI", etc.
+        # Direct "{Org} {Role} current {year}" produces better search results.
         elif category == "leadership":
-            ceo_match = re.search(r'\b(?:ceo|president|cfo|cto|head|founder)\s+(?:of\s+)?([A-Za-z0-9 &.,\-]{2,50})', clean, re.IGNORECASE)
-            org = ceo_match.group(1).strip() if ceo_match else clean
-            primary = f"{org} CEO current {year}"
+            org_match = re.search(r'\b(?:ceo|president|cfo|cto|head|founder)\s+(?:of\s+)?([A-Za-z0-9 &.,\-]{2,50})', clean, re.IGNORECASE)
+            if not org_match:
+                org_match = re.search(r'\b(?:who\s+(?:runs?|leads?)\s+)([A-Za-z0-9 &.,\-]{2,50})', clean, re.IGNORECASE)
+            org = org_match.group(1).strip() if org_match else clean
+            role_match = re.search(r'\b(ceo|president|cfo|cto|head|founder|director)\b', clean, re.IGNORECASE)
+            role = role_match.group(1).upper() if role_match else "CEO"
+            primary = f"{org} {role} current {year}"
 
         # Weather: use existing location extraction so we share the same stripping logic.
         elif category == "weather":
@@ -511,23 +527,25 @@ class ChatService:
 
         queries = [primary]
 
-        # For current-event or freshness-sensitive queries, always add year-anchored + "latest" variants.
-        if self._is_current_events_query(query) or self._needs_sports_context(query) or primary != query:
+        # Add year-anchored and "latest" variants for freshness-sensitive categories or rewritten queries.
+        needs_variants = (category in self._FRESHNESS_ALWAYS_CATEGORIES) or (primary != query)
+        if needs_variants:
             year_query = f"{query} {year}"
             if year_query.lower().strip() != primary.lower().strip():
                 queries.append(year_query)
-            latest_query = f"latest {query}"
-            normed = {q.strip().lower() for q in queries}
-            if latest_query.lower().strip() not in normed:
-                queries.append(latest_query)
+            # Skip "latest {query}" for sports_event — we have a strong rewritten primary already,
+            # and "latest who won X" can trigger Korean Won (KRW) disambiguation in search engines.
+            if category != "sports_event":
+                latest_query = f"latest {query}"
+                normed = {q.strip().lower() for q in queries}
+                if latest_query.lower().strip() not in normed:
+                    queries.append(latest_query)
 
-        if self._needs_market_context(query):
-            queries.extend(
-                [
-                    "stock market today S&P 500 Dow Nasdaq",
-                    "SPY QQQ DIA market update today",
-                ]
-            )
+        if category == "finance":
+            queries.extend([
+                "stock market today S&P 500 Dow Nasdaq",
+                "SPY QQQ DIA market update today",
+            ])
 
         deduped: list[str] = []
         seen: set[str] = set()
@@ -1339,7 +1357,7 @@ class ChatService:
             return short_reply, [], [], updated_profile
 
         category = self._classify_query(question)
-        is_fresh = self._is_freshness_sensitive(question)
+        is_fresh = self._is_freshness_sensitive(question, category=category)
         logger.info("ask_start category=%s freshness_sensitive=%s question=%r", category, is_fresh, question[:100])
 
         hits = retrieve_context(question, self.chunks, top_k=TOP_K)
@@ -1457,7 +1475,7 @@ class ChatService:
             )
             answer = self.llm.chat(messages=regen_msgs, model=model)
 
-        if (self._is_current_events_query(question) or self._needs_sports_context(question)) and self._looks_stale_current_answer(answer):
+        if is_fresh and self._looks_stale_current_answer(answer):
             logger.info("stale_answer_detected question=%r — rerunning with web context", question[:100])
             has_live_signal = bool(web_results) or bool(market_context.strip()) or bool(news_context.strip()) or bool(
                 weather_context.strip()
@@ -1530,7 +1548,7 @@ class ChatService:
             yield ("done", {"answer": short_reply, "hits": [], "web_results": [], "updated_profile": up})
             return
         s_category = self._classify_query(question)
-        s_fresh = self._is_freshness_sensitive(question)
+        s_fresh = self._is_freshness_sensitive(question, category=s_category)
         logger.info("ask_stream_start category=%s freshness_sensitive=%s question=%r", s_category, s_fresh, question[:100])
         hits = retrieve_context(question, self.chunks, top_k=TOP_K)
         has_strong = bool(hits and hits[0][0] >= MIN_SCORE)
@@ -1581,7 +1599,7 @@ class ChatService:
             regen.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+web_ctx+profile_ctx+(uploaded_file_context or "")+"Question: "+question+"\n\nGive a direct, concrete, useful answer. Do not say you cannot access real-time or live data. Use live context above if available. Otherwise use general knowledge and note uncertainty briefly."})
             answer = self.llm.chat(messages=regen, model=model)
             yield ("replace", answer)
-        if (self._is_current_events_query(question) or self._needs_sports_context(question)) and self._looks_stale_current_answer(answer):
+        if s_fresh and self._looks_stale_current_answer(answer):
             logger.info("stale_answer_detected_stream question=%r — rerunning with web context", question[:100])
             if not live:
                 if self._needs_market_context(question):
