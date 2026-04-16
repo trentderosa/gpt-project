@@ -15,7 +15,7 @@ from .config import ALWAYS_WEB_SEARCH, MIN_SCORE, TOP_K
 from .live_data_store import LiveDataStore
 from .llm_wrapper import LLMWrapper
 from .retriever import retrieve_context
-from .search_tool import DisabledWebSearchTool, WebSearchTool
+from .search_tool import CompositeWebSearchTool, DisabledWebSearchTool, WebSearchTool
 
 
 SYSTEM_PROMPT = """You are Cortex Engine, created by Trent DeRosa.
@@ -34,8 +34,8 @@ For any time-sensitive topic — current events, news, prices, sports scores, po
 software versions, laws, regulations, product info, rankings, schedules, or anything about living people —
 rely exclusively on the provided web results. Do not fill gaps from training memory.
 If web results are provided but do not clearly answer the question, say so and give a best-effort answer.
-If no web results are available and the question is time-sensitive, give your best-effort answer
-based on general knowledge and briefly note it may not reflect the latest information.
+If no live results are available and the question is time-sensitive, do not invent a current fact from training memory.
+State that the live evidence is insufficient, summarize any partial live signal that is available, and avoid pretending stale knowledge is current.
 Never present stale training data as current fact. Never say 'as of my last update' or reference
 a past cutoff year as if it is reliable current information.
 Never say "unable to retrieve live data", "I don't have real-time access", "I cannot retrieve",
@@ -43,7 +43,7 @@ Never say "unable to retrieve live data", "I don't have real-time access", "I ca
 Always provide a direct, concrete, useful answer — never a dead end.
 
 If runtime date/time context is provided, use it for questions about today's date, day, or time.
-If local notes and web results do not cover a question, use general knowledge and be clear when uncertain.
+If local notes and live results do not cover a non-time-sensitive question, use general knowledge and be clear when uncertain.
 Never answer with only 'I don't know based on my notes'.
 When the user asks for code, respond with a clean markdown code block using the correct language tag and proper indentation.
 For simple code requests, keep explanation brief and prioritize readable code/output formatting.
@@ -313,6 +313,7 @@ class ChatService:
         self.history: list[dict] = []
         self.web_search_tool = web_search_tool or DisabledWebSearchTool()
         self.live_store = LiveDataStore()
+        self.last_web_search_meta: dict = {}
 
     def _http_get(self, url: str, params: dict | None = None, timeout: int = 8, attempts: int = 3):
         last_exc = None
@@ -661,78 +662,258 @@ class ChatService:
             return False
         return True
 
+    def _preferred_domains_for_category(self, question: str, category: str) -> list[str]:
+        q_lower = question.lower()
+        domains: set[str] = set()
+        if category in ("sports", "sports_event"):
+            domains.update(_AUTHORITY_DOMAINS["sports"])
+        elif category == "finance":
+            domains.update(_AUTHORITY_DOMAINS["finance"])
+        elif category in ("leadership", "news", "current_events"):
+            domains.update(_AUTHORITY_DOMAINS["news"])
+            if re.search(r"\b(?:government|president|prime minister|election|senate|congress|governor)\b", q_lower):
+                domains.update({domain for domain in _AUTHORITY_DOMAINS["government"] if not domain.startswith(".")})
+        return sorted(domain for domain in domains if "." in domain and not domain.startswith("."))
+
+    def _results_quality(self, results: list[dict], category: str, question: str) -> tuple[bool, str]:
+        if not results:
+            return False, "empty_results"
+        relevant = self._web_results_relevant(results, category)
+        snippetful = 0
+        provider_names: set[str] = set()
+        authority_domains = set(self._preferred_domains_for_category(question, category))
+        authority_hits = 0
+        for item in results:
+            provider_names.add((item.get("provider") or "").strip().lower())
+            snippet = (item.get("snippet") or "").strip()
+            if len(snippet) >= 40:
+                snippetful += 1
+            url = (item.get("url") or "").lower()
+            if any(domain in url for domain in authority_domains):
+                authority_hits += 1
+        if category in ("sports", "sports_event", "finance", "weather", "leadership", "news", "current_events") and not relevant:
+            return False, "irrelevant_results"
+        if authority_domains and authority_hits == 0 and snippetful == 0:
+            return False, "non_authoritative_results"
+        if snippetful == 0 and provider_names != {"wikipedia"}:
+            return False, "weak_snippets"
+        return True, "strong_results"
+
     def _search_live_web(self, question: str, max_results: int = 5, category: str | None = None, is_fresh: bool | None = None) -> list[dict]:
         merged: list[dict] = []
         seen_urls: set[str] = set()
         market_query = self._needs_market_context(question)
+        category = category or self._classify_query(question)
         if is_fresh is None:
-            is_fresh = self._is_freshness_sensitive(question)
+            is_fresh = self._is_freshness_sensitive(question, category=category)
         fresh = is_fresh
+        query_variants = self._web_queries(question, category=category)
+        preferred_domains = self._preferred_domains_for_category(question, category)
+        provider_sequence = (
+            self.web_search_tool.provider_sequence(category=category, fresh=fresh)
+            if isinstance(self.web_search_tool, CompositeWebSearchTool)
+            else ["default"]
+        )
+
+        self.last_web_search_meta = {
+            "question": question,
+            "category": category,
+            "fresh": fresh,
+            "query_variants": list(query_variants),
+            "preferred_domains": list(preferred_domains),
+            "provider_sequence": list(provider_sequence),
+            "attempts": [],
+            "winning_provider": None,
+            "winning_source": None,
+            "ddg_used": False,
+        }
 
         if fresh:
             logger.info("web_search_fresh_mode question=%r", question[:100])
 
-        def _collect(query: str, use_fresh: bool) -> None:
+        def _search_provider(
+            provider_name: str,
+            query: str,
+            use_fresh: bool,
+            domains: list[str] | None,
+            relax_market_filter: bool = False,
+            stage: str = "primary",
+        ) -> list[dict]:
+            logger.info(
+                "web_search_provider_attempt provider=%s stage=%s fresh=%s domains=%s query=%r",
+                provider_name,
+                stage,
+                use_fresh,
+                bool(domains),
+                query[:100],
+            )
             try:
-                items = self.web_search_tool.search(query, max_results=max_results, fresh=use_fresh)
+                if isinstance(self.web_search_tool, CompositeWebSearchTool):
+                    items = self.web_search_tool.search_with_provider(
+                        provider_name=provider_name,
+                        query=query,
+                        max_results=max_results,
+                        fresh=use_fresh,
+                        category=category,
+                        preferred_domains=domains,
+                    )
+                else:
+                    items = self.web_search_tool.search(
+                        query=query,
+                        max_results=max_results,
+                        fresh=use_fresh,
+                        category=category,
+                        preferred_domains=domains,
+                    )
             except Exception as exc:
-                logger.warning("web_search_failed query=%r fresh=%s error=%s", query[:100], use_fresh, exc)
-                return
+                logger.warning(
+                    "web_search_failed provider=%s query=%r fresh=%s stage=%s error=%s",
+                    provider_name,
+                    query[:100],
+                    use_fresh,
+                    stage,
+                    exc,
+                )
+                items = []
+
+            accepted: list[dict] = []
+            dropped_for_market = 0
             for item in items:
                 url = (item.get("url") or "").strip()
                 if not url or url in seen_urls:
                     continue
-                if market_query and not self._is_market_result(item):
+                if market_query and not relax_market_filter and not self._is_market_result(item):
+                    dropped_for_market += 1
                     continue
                 seen_urls.add(url)
+                item.setdefault("provider", provider_name)
+                accepted.append(item)
                 merged.append(item)
-
-        # Primary pass: use time-limited search for freshness-sensitive queries.
-        for query in self._web_queries(question, category=category):
-            _collect(query, use_fresh=fresh)
-            if len(merged) >= max_results:
-                logger.info("web_search_complete fresh=%s source_count=%d", fresh, len(merged))
-                return self._rank_web_results(merged[:max_results], question)
-
-        # If fresh-mode returned nothing, retry WITHOUT the time limit.
-        if not merged and fresh:
-            logger.info("web_search_fresh_empty_retrying_no_timelimit question=%r", question[:100])
-            for query in self._web_queries(question, category=category)[:2]:
-                _collect(query, use_fresh=False)
                 if len(merged) >= max_results:
                     break
 
-        # If market filter dropped everything, retry top query without the filter.
-        if not merged and market_query:
-            logger.info("web_search_market_filter_relaxed question=%r", question[:100])
-            queries = self._web_queries(question, category=category)
-            top_query = queries[0] if queries else question
-            try:
-                items = self.web_search_tool.search(top_query, max_results=max_results, fresh=False)
-                for item in items:
-                    url = (item.get("url") or "").strip()
-                    if url and url not in seen_urls:
-                        seen_urls.add(url)
-                        merged.append(item)
-            except Exception as exc:
-                logger.warning("web_search_market_relaxed_failed error=%s", exc)
+            quality_ok, quality_reason = self._results_quality(accepted, category, question)
+            attempt = {
+                "provider": provider_name,
+                "query": query,
+                "fresh": use_fresh,
+                "stage": stage,
+                "preferred_domains": list(domains or []),
+                "accepted_results": len(accepted),
+                "raw_results": len(items),
+                "dropped_for_market_filter": dropped_for_market,
+                "quality_ok": quality_ok,
+                "quality_reason": quality_reason,
+            }
+            self.last_web_search_meta["attempts"].append(attempt)
+            if provider_name == "ddg" and items:
+                self.last_web_search_meta["ddg_used"] = True
+            if accepted and not self.last_web_search_meta["winning_source"]:
+                self.last_web_search_meta["winning_provider"] = provider_name
+                self.last_web_search_meta["winning_source"] = accepted[0].get("url")
+            logger.info(
+                "web_search_provider_result provider=%s stage=%s accepted=%d raw=%d quality=%s reason=%s fallback=%s",
+                provider_name,
+                stage,
+                len(accepted),
+                len(items),
+                quality_ok,
+                quality_reason,
+                not quality_ok,
+            )
+            return accepted
 
-        # Final fallback: simplified "latest {question} {year}" query.
-        if not merged:
+        def _provider_satisfied(provider_name: str) -> tuple[bool, str]:
+            provider_results = [item for item in merged if (item.get("provider") or "").strip().lower() == provider_name]
+            quality_ok, quality_reason = self._results_quality(provider_results, category, question)
+            enough_results = len(provider_results) >= min(3, max_results)
+            return (quality_ok and enough_results) or (quality_ok and len(provider_results) >= 1 and category != "general"), quality_reason
+
+        for provider_name in provider_sequence:
+            provider_done = False
+            last_reason = "no_attempt"
+
+            for query in query_variants:
+                _search_provider(provider_name, query, use_fresh=fresh, domains=None, stage="primary")
+                provider_done, last_reason = _provider_satisfied(provider_name)
+                if provider_done or len(merged) >= max_results:
+                    break
+
+            if provider_done or len(merged) >= max_results:
+                break
+
+            if fresh:
+                logger.info(
+                    "web_search_provider_fallback provider=%s reason=%s action=no_timelimit_retry",
+                    provider_name,
+                    last_reason,
+                )
+                for query in query_variants[:2]:
+                    _search_provider(provider_name, query, use_fresh=False, domains=None, stage="no_timelimit_retry")
+                    provider_done, last_reason = _provider_satisfied(provider_name)
+                    if provider_done or len(merged) >= max_results:
+                        break
+                if provider_done or len(merged) >= max_results:
+                    break
+
+            if preferred_domains and category in ("sports", "sports_event", "finance", "leadership", "news", "current_events"):
+                logger.info(
+                    "web_search_provider_fallback provider=%s reason=%s action=authoritative_retry domains=%s",
+                    provider_name,
+                    last_reason,
+                    ",".join(preferred_domains[:5]),
+                )
+                for query in query_variants[:2]:
+                    _search_provider(provider_name, query, use_fresh=False, domains=preferred_domains, stage="authoritative_retry")
+                    provider_done, last_reason = _provider_satisfied(provider_name)
+                    if provider_done or len(merged) >= max_results:
+                        break
+                if provider_done or len(merged) >= max_results:
+                    break
+
+            if market_query:
+                logger.info(
+                    "web_search_provider_fallback provider=%s reason=%s action=market_filter_relaxed",
+                    provider_name,
+                    last_reason,
+                )
+                top_query = query_variants[0] if query_variants else question
+                _search_provider(provider_name, top_query, use_fresh=False, domains=None, relax_market_filter=True, stage="market_filter_relaxed")
+                provider_done, last_reason = _provider_satisfied(provider_name)
+                if provider_done or len(merged) >= max_results:
+                    break
+
+            logger.info(
+                "web_search_provider_escalating from_provider=%s reason=%s next_provider=%s",
+                provider_name,
+                last_reason,
+                provider_sequence[provider_sequence.index(provider_name) + 1] if provider_sequence.index(provider_name) + 1 < len(provider_sequence) else "none",
+            )
+
+        if not merged and provider_sequence:
             year = datetime.now().year
             fallback_q = f"latest {question.strip().rstrip('?!')} {year}"
             logger.info("web_search_fallback_retry fallback=%r", fallback_q[:100])
-            try:
-                items = self.web_search_tool.search(fallback_q, max_results=max_results, fresh=False)
-                for item in items:
-                    url = (item.get("url") or "").strip()
-                    if url and url not in seen_urls:
-                        merged.append(item)
-            except Exception as exc:
-                logger.warning("web_search_fallback_failed error=%s", exc)
+            for provider_name in provider_sequence:
+                _search_provider(provider_name, fallback_q, use_fresh=False, domains=None, stage="final_fallback")
+                quality_ok, _ = _provider_satisfied(provider_name)
+                if quality_ok or merged:
+                    break
 
-        logger.info("web_search_complete fresh=%s source_count=%d", fresh, len(merged))
-        return self._rank_web_results(merged, question)
+        ranked = self._rank_web_results(merged[:max_results], question)
+        if ranked and not self.last_web_search_meta.get("winning_provider"):
+            self.last_web_search_meta["winning_provider"] = (ranked[0].get("provider") or "").strip().lower() or None
+            self.last_web_search_meta["winning_source"] = ranked[0].get("url")
+        logger.info(
+            "web_search_complete fresh=%s source_count=%d provider_sequence=%s winning_provider=%s ddg_used=%s freshness_filters_applied=%s",
+            fresh,
+            len(ranked),
+            provider_sequence,
+            self.last_web_search_meta.get("winning_provider"),
+            self.last_web_search_meta.get("ddg_used"),
+            fresh,
+        )
+        return ranked
 
     def _trim_history(self, history: list[dict], max_messages: int = 16, max_chars: int = 12000) -> list[dict]:
         trimmed = history[-max_messages:]
@@ -1358,6 +1539,25 @@ class ChatService:
             return ""
         return f"Context from local notes:\n{context}\n\n"
 
+    def _general_knowledge_instruction(self, is_fresh: bool) -> str:
+        if is_fresh:
+            return (
+                "Instruction: If local notes do not cover this, rely only on the live context provided here. "
+                "Do not fill current facts from training memory.\n\n"
+            )
+        return "Instruction: If local notes do not cover this, answer from general knowledge.\n\n"
+
+    def _live_only_instruction(self, is_fresh: bool) -> str:
+        if is_fresh:
+            return (
+                "Use only the live context provided above for current facts. "
+                "If it is incomplete, say the live evidence is incomplete and give the best answer supported by that live context only."
+            )
+        return (
+            "Give a direct answer using available live context or general knowledge. "
+            "If uncertain, state uncertainty briefly, then still provide your best useful answer."
+        )
+
     def ask(
         self,
         question: str,
@@ -1439,7 +1639,7 @@ class ChatService:
         note_context_block = self._build_note_context_block(context, question, category, is_fresh, web_results)
         # has_live_signal: only count web_results as live signal if they're topically relevant.
         has_live_signal = (bool(web_results) and self._web_results_relevant(web_results, category)) or bool(market_context.strip()) or bool(news_context.strip()) or bool(weather_context.strip())
-        anti_refusal = "" if has_strong_note_context else "Instruction: If local notes do not cover this, answer from general knowledge.\n\n"
+        anti_refusal = "" if has_strong_note_context else self._general_knowledge_instruction(is_fresh)
         anti_stale = "Instruction: Use the live context provided above. Do not reference training cutoff dates.\n\n" if is_fresh and has_live_signal else ""
         # When live search ran but returned nothing useful, the model must still commit to a concrete answer.
         no_live_push = (
@@ -1447,6 +1647,14 @@ class ChatService:
             "Give your best-effort answer using general knowledge — state a concrete answer even if you must note it may not reflect the very latest data. "
             "Do not say you cannot provide the information or tell the user to check elsewhere without first giving a direct answer.\n\n"
         ) if is_fresh and _effective_web and not has_live_signal else ""
+
+        if is_fresh and _effective_web and not has_live_signal:
+            no_live_push = (
+                "Instruction: Live web search ran but returned no results for this query. "
+                "Use only any live context available in this prompt. "
+                "If there is still not enough live evidence, say the current answer could not be verified from live sources in this run. "
+                "Do not invent a current fact from training memory.\n\n"
+            )
 
         messages.append(
             {
@@ -1484,8 +1692,7 @@ class ChatService:
                         f"{profile_context}"
                         f"{uploaded_file_context or ''}"
                         f"Question: {question}\n\n"
-                        "Give a direct answer using available live context or general knowledge. "
-                        "If uncertain, state uncertainty briefly, then still provide your best useful answer."
+                        f"{self._live_only_instruction(is_fresh)}"
                     ),
                 }
             )
@@ -1510,7 +1717,7 @@ class ChatService:
                         f"Question: {question}\n\n"
                         "Give a direct, concrete, useful answer. "
                         "Do not say you cannot access real-time or live data. "
-                        "Use the live context above if available. Otherwise use general knowledge and note uncertainty briefly."
+                        f"{self._live_only_instruction(is_fresh)}"
                     ),
                 }
             )
@@ -1535,8 +1742,7 @@ class ChatService:
                                 f"{web_context}"
                                 f"{profile_context}"
                                 f"Question: {question}\n\n"
-                                "Give a useful best-effort answer. Use any live context provided above. "
-                                "Be explicit about uncertainty but still answer directly."
+                                f"{self._live_only_instruction(is_fresh)}"
                             ),
                         }
                     )
@@ -1619,13 +1825,20 @@ class ChatService:
         web_ctx = self._build_web_context_block(web_results)
         note_blk = self._build_note_context_block(context, question, s_category, s_fresh, web_results)
         live = (bool(web_results) and self._web_results_relevant(web_results, s_category)) or bool(market_ctx.strip()) or bool(news_ctx.strip()) or bool(weather_ctx.strip())
-        anti_r = "" if has_strong else "Instruction: If local notes do not cover this, answer from general knowledge.\n\n"
+        anti_r = "" if has_strong else self._general_knowledge_instruction(s_fresh)
         anti_s = ("Instruction: Use the live context provided above. Do not reference training cutoff dates.\n\n" if s_fresh and live else "")
         no_live_push_s = (
             "Instruction: Live web search ran but returned no results for this query. "
             "Give your best-effort answer using general knowledge — state a concrete answer even if you must note it may not reflect the very latest data. "
             "Do not say you cannot provide the information or tell the user to check elsewhere without first giving a direct answer.\n\n"
         ) if s_fresh and _effective_web and not live else ""
+        if s_fresh and _effective_web and not live:
+            no_live_push_s = (
+                "Instruction: Live web search ran but returned no results for this query. "
+                "Use only any live context available in this prompt. "
+                "If there is still not enough live evidence, say the current answer could not be verified from live sources in this run. "
+                "Do not invent a current fact from training memory.\n\n"
+            )
         messages.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+web_ctx+profile_ctx+(uploaded_file_context or "")+note_blk+anti_r+anti_s+no_live_push_s+"User question:\n"+question})
         streamed = []
         try:
@@ -1639,7 +1852,7 @@ class ChatService:
         if self._looks_like_notes_refusal(answer):
             fbk = [{"role": "system", "content": SYSTEM_PROMPT}]
             fbk.extend(self._trim_history(eff_h))
-            fbk.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+web_ctx+profile_ctx+(uploaded_file_context or "")+"Question: "+question+"\n\nGive a direct answer using available live context or general knowledge. If uncertain, state uncertainty briefly, then still provide your best useful answer."})
+            fbk.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+web_ctx+profile_ctx+(uploaded_file_context or "")+"Question: "+question+"\n\n"+self._live_only_instruction(s_fresh)})
             answer = self.llm.chat(messages=fbk, model=model)
             yield ("replace", answer)
 
@@ -1648,7 +1861,7 @@ class ChatService:
             logger.info("refusal_output_detected_stream question=%r — regenerating", question[:100])
             regen = [{"role": "system", "content": SYSTEM_PROMPT}]
             regen.extend(self._trim_history(eff_h))
-            regen.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+web_ctx+profile_ctx+(uploaded_file_context or "")+"Question: "+question+"\n\nGive a direct, concrete, useful answer. Do not say you cannot access real-time or live data. Use live context above if available. Otherwise use general knowledge and note uncertainty briefly."})
+            regen.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+web_ctx+profile_ctx+(uploaded_file_context or "")+"Question: "+question+"\n\nGive a direct, concrete, useful answer. Do not say you cannot access real-time or live data. "+self._live_only_instruction(s_fresh)})
             answer = self.llm.chat(messages=regen, model=model)
             yield ("replace", answer)
         if s_fresh and self._looks_stale_current_answer(answer):
@@ -1659,7 +1872,7 @@ class ChatService:
                 else:
                     sf = [{"role": "system", "content": SYSTEM_PROMPT}]
                     sf.extend(self._trim_history(eff_h))
-                    sf.append({"role": "user", "content": runtime_ctx+web_ctx+profile_ctx+"Question: "+question+"\n\nGive a useful best-effort answer. Use any live context provided above. Be explicit about uncertainty but still answer directly."})
+                    sf.append({"role": "user", "content": runtime_ctx+web_ctx+profile_ctx+"Question: "+question+"\n\n"+self._live_only_instruction(s_fresh)})
                     answer = self.llm.chat(messages=sf, model=model)
                 yield ("replace", answer)
             else:

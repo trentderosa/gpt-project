@@ -12,6 +12,9 @@ CHUNK_SIZE = 700
 MIN_SCORE = 1.5
 
 WEB_SEARCH_PROVIDER = os.getenv("WEB_SEARCH_PROVIDER", "multi").strip().lower()
+WEB_SEARCH_PROVIDER_PRIORITY = os.getenv("WEB_SEARCH_PROVIDER_PRIORITY", "brave,tavily,ddg,wikipedia").strip()
+BRAVE_SEARCH_API_KEY = (os.getenv("BRAVE_SEARCH_API_KEY") or "").strip()
+TAVILY_API_KEY = (os.getenv("TAVILY_API_KEY") or "").strip()
 
 # When True, the server forces web search on all non-exempt queries regardless of
 # the client's use_web_search flag.  Set ALWAYS_WEB_SEARCH=false to disable.

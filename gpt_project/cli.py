@@ -3,10 +3,17 @@ import argparse
 from openai import APIConnectionError, AuthenticationError, RateLimitError
 
 from .core.chat_service import ChatService
-from .core.config import DEFAULT_MODEL, KNOWLEDGE_DIR
+from .core.config import (
+    BRAVE_SEARCH_API_KEY,
+    DEFAULT_MODEL,
+    KNOWLEDGE_DIR,
+    TAVILY_API_KEY,
+    WEB_SEARCH_PROVIDER,
+    WEB_SEARCH_PROVIDER_PRIORITY,
+)
 from .core.llm_wrapper import LLMWrapper
 from .core.retriever import load_knowledge_chunks
-from .core.search_tool import DuckDuckGoSearchTool
+from .core.search_tool import build_search_tool
 
 
 SMALL_TALK = {"hi", "hello", "hey", "yo", "sup", "what up"}
@@ -25,7 +32,16 @@ def main() -> None:
         raise SystemExit(f"No .txt files found in {KNOWLEDGE_DIR}")
 
     llm = LLMWrapper(model=args.model)
-    chat = ChatService(llm=llm, chunks=chunks, web_search_tool=DuckDuckGoSearchTool())
+    chat = ChatService(
+        llm=llm,
+        chunks=chunks,
+        web_search_tool=build_search_tool(
+            web_search_provider=WEB_SEARCH_PROVIDER,
+            provider_priority=[part.strip() for part in WEB_SEARCH_PROVIDER_PRIORITY.split(",") if part.strip()],
+            brave_api_key=BRAVE_SEARCH_API_KEY,
+            tavily_api_key=TAVILY_API_KEY,
+        ),
+    )
 
     print("Cortex Engine running. Type 'exit' to quit.")
     print(f"Loaded {len(chunks)} chunks from {KNOWLEDGE_DIR}\n")

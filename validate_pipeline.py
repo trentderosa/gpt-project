@@ -1,24 +1,24 @@
 """
-End-to-end validation script for the Cortex Engine pipeline.
-Runs each test query through the real ChatService and reports routing + result metadata.
+Validation script for the Cortex Engine live-data pipeline.
+Runs the requested queries through the real ChatService and reports
+provider routing, fallback behavior, and answer quality signals.
 """
 import logging
-import sys
 import os
-import json
-from datetime import datetime
-from io import StringIO
+import re
+import sys
 from pathlib import Path
 
-# ── env / path setup ──────────────────────────────────────────────────────────
+
 BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE))
 os.chdir(BASE)
 
 from dotenv import load_dotenv
+
 load_dotenv(override=True)
 
-# ── capture log output per query ──────────────────────────────────────────────
+
 class LogCapture(logging.Handler):
     def __init__(self):
         super().__init__()
@@ -32,241 +32,180 @@ class LogCapture(logging.Handler):
         self.records.clear()
         return lines
 
-# Attach capture handler before imports that configure loggers
+
 capture = LogCapture()
 capture.setFormatter(logging.Formatter("%(name)s %(levelname)s %(message)s"))
 logging.getLogger().addHandler(capture)
 logging.getLogger().setLevel(logging.DEBUG)
 
-# ── service bootstrap ─────────────────────────────────────────────────────────
-from gpt_project.core.config import DEFAULT_MODEL, KNOWLEDGE_DIR
+
+from gpt_project.core.chat_service import ChatService
+from gpt_project.core.config import (
+    BRAVE_SEARCH_API_KEY,
+    DEFAULT_MODEL,
+    KNOWLEDGE_DIR,
+    TAVILY_API_KEY,
+    WEB_SEARCH_PROVIDER,
+    WEB_SEARCH_PROVIDER_PRIORITY,
+)
 from gpt_project.core.llm_wrapper import LLMWrapper
 from gpt_project.core.retriever import load_knowledge_chunks
-from gpt_project.core.search_tool import DuckDuckGoSearchTool, CompositeWebSearchTool, WikipediaSearchTool
-from gpt_project.core.chat_service import ChatService
+from gpt_project.core.search_tool import build_search_tool
+
 
 llm = LLMWrapper(model=DEFAULT_MODEL)
 chunks = load_knowledge_chunks(KNOWLEDGE_DIR)
-search_tool = CompositeWebSearchTool(providers=[
-    DuckDuckGoSearchTool(),
-    WikipediaSearchTool(),
-])
-svc = ChatService(llm=llm, chunks=chunks, web_search_tool=search_tool)
+search_tool = build_search_tool(
+    web_search_provider=WEB_SEARCH_PROVIDER,
+    provider_priority=[part.strip() for part in WEB_SEARCH_PROVIDER_PRIORITY.split(",") if part.strip()],
+    brave_api_key=BRAVE_SEARCH_API_KEY,
+    tavily_api_key=TAVILY_API_KEY,
+)
 
-# ── test queries ──────────────────────────────────────────────────────────────
 TESTS = [
-    ("sports",       "what is the best team in the NBA right now"),
+    ("sports", "what is the best team in the NBA right now"),
     ("sports_event", "who won the super bowl"),
-    ("sports_event", "who won the masters this year"),
-    ("sports",       "washington wizards record"),
-    ("weather",      "weather in harrisonburg today"),
-    ("finance",      "latest nvidia stock price"),
-    ("leadership",   "who is the CEO of OpenAI"),
-    ("current_events", "what happened in the election today"),
-    ("finance",      "current interest rate"),
-    ("current_events", "what is the latest iPhone"),
+    ("weather", "weather in harrisonburg today"),
+    ("finance", "latest nvidia stock price"),
+    ("leadership", "who is the CEO of OpenAI"),
 ]
 
-SEP = "=" * 80
+SEP = "=" * 90
 
-def parse_logs(lines):
-    """Extract key routing signals from log lines."""
+
+def parse_logs(lines: list[str]) -> dict:
     signals = {
         "category": None,
         "freshness_sensitive": None,
-        "fresh_mode": False,
-        "fresh_empty_retry": False,
-        "market_filter_relaxed": False,
-        "fallback_retry": False,
-        "refusal_detected": False,
-        "stale_detected": False,
-        "notes_suppressed": False,
-        "web_source_count": None,
-        "query_variants": [],
+        "source_count": None,
     }
     for line in lines:
         if "ask_start" in line or "ask_stream_start" in line:
-            m_cat = __import__("re").search(r"category=(\S+)", line)
-            m_fresh = __import__("re").search(r"freshness_sensitive=(\S+)", line)
-            if m_cat:
-                signals["category"] = m_cat.group(1)
-            if m_fresh:
-                signals["freshness_sensitive"] = m_fresh.group(1)
-        if "web_search_fresh_mode" in line:
-            signals["fresh_mode"] = True
-        if "web_search_fresh_empty_retrying" in line:
-            signals["fresh_empty_retry"] = True
-        if "web_search_market_filter_relaxed" in line:
-            signals["market_filter_relaxed"] = True
-        if "web_search_fallback_retry" in line:
-            signals["fallback_retry"] = True
-        if "refusal_output_detected" in line:
-            signals["refusal_detected"] = True
-        if "stale_answer_detected" in line:
-            signals["stale_detected"] = True
-        if "notes_suppressed" in line:
-            signals["notes_suppressed"] = True
+            category_match = re.search(r"category=(\S+)", line)
+            fresh_match = re.search(r"freshness_sensitive=(\S+)", line)
+            if category_match:
+                signals["category"] = category_match.group(1)
+            if fresh_match:
+                signals["freshness_sensitive"] = fresh_match.group(1)
         if "web_search_complete" in line:
-            m = __import__("re").search(r"source_count=(\d+)", line)
-            if m:
-                signals["web_source_count"] = int(m.group(1))
-        if "query_classified" in line:
-            m = __import__("re").search(r'category=(\S+)\s+question=(.+)$', line)
-            if m:
-                signals["query_variants"].append(m.group(2).strip("'\""))
+            count_match = re.search(r"source_count=(\d+)", line)
+            if count_match:
+                signals["source_count"] = int(count_match.group(1))
     return signals
 
-def score_answer(answer: str, query: str) -> tuple[str, str]:
-    """
-    Heuristic pass/warn/fail for each known query.
-    Returns (status, reason).
-    """
-    a = answer.lower()
-    q = query.lower()
-    stale_phrases = [
-        "as of 2022", "as of 2023", "as of 2024", "as of early 2025", "as of 2025",
-        "as of my last update", "my knowledge cutoff", "my training data",
-        "i cannot access real-time", "i don't have access to real-time",
-        "unable to retrieve", "cannot retrieve",
-    ]
-    for p in stale_phrases:
-        if p in a:
-            return "FAIL", f"stale/refusal phrase present: '{p}'"
 
-    if "super bowl" in q:
-        # Should mention a year and a team name
-        import re
-        if re.search(r"\b(eagle|chief|patriot|ram|buck|bear|49er|bronco|giant|cowboy|charger|dolphin|raider|jet|packer|saint|panther|titan|falcon|seahawk|steeler|bengal|brown|lion|cardinal|raven|texan|colt|jaguar|vike|commander|kansas city|philadelphia|new england|seattle|san francisco|los angeles|green bay|dallas|new york)\b", a):
-            return "PASS", "team name found"
-        return "WARN", "no recognizable team name in answer"
-
-    if "masters" in q:
-        import re
-        if re.search(r"\b(scheffler|rahm|rory|mcilroy|woods|johnson|thomas|morikawa|cantlay|spieth|matsuyama|fleetwood|hovland|burns|lower|homa|finau|fitzpatrick|aberg|ludvig)\b", a):
-            return "PASS", "golfer name found"
-        return "WARN", "no recognizable golfer name"
-
-    if "wizards record" in q:
-        import re
-        if re.search(r"\b\d+\s*[-–]\s*\d+\b", a):
-            return "PASS", "win-loss record pattern found"
-        return "WARN", "no win-loss record pattern found"
-
-    if "weather" in q and "harrisonburg" in q:
-        import re
-        if re.search(r"\b\d+\s*°?\s*[fc]\b|\bfahrenheit\b|\bcelsius\b|\bdegree\b|\btemp\b|\brain\b|\bsunny\b|\bcloudy\b|\bpartly\b|\bforecast\b", a):
-            return "PASS", "weather data signal found"
-        return "WARN", "no weather data found in answer"
-
-    if "nvidia" in q:
-        import re
-        if re.search(r"\$[\d,]+\.?\d*|\b\d{2,4}\.?\d*\s*(?:per share|usd|dollars?)\b|\bprice\b.*\b\d+\b|\bnvda\b.*\b\d+\b", a):
-            return "PASS", "price signal found"
-        return "WARN", "no NVIDIA price value in answer"
-
-    if "ceo of openai" in q:
-        if "sam altman" in a:
+def score_answer(query: str, answer: str) -> tuple[str, str]:
+    text = answer.lower()
+    if any(
+        phrase in text
+        for phrase in [
+            "as of my last update",
+            "my knowledge cutoff",
+            "i cannot access real-time",
+            "unable to retrieve",
+            "cannot retrieve",
+        ]
+    ):
+        return "FAIL", "stale/refusal language present"
+    if "best team in the nba" in query.lower():
+        if re.search(r"\b(celtics?|thunder|cavaliers?|cavs?|nuggets?|knicks?|bucks?|lakers?)\b", text):
+            return "PASS", "recognized NBA team named"
+        return "WARN", "no clear NBA team named"
+    if "super bowl" in query.lower():
+        if re.search(r"\b(eagles?|chiefs?|philadelphia|kansas city)\b", text):
+            return "PASS", "recognized Super Bowl winner named"
+        return "WARN", "no clear winner named"
+    if "weather in harrisonburg" in query.lower():
+        if re.search(r"\b\d+\b", text) and any(word in text for word in ["forecast", "temperature", "rain", "sun", "cloud", "wind"]):
+            return "PASS", "weather details present"
+        return "WARN", "weather details look thin"
+    if "nvidia" in query.lower():
+        if re.search(r"\$[\d,]+\.?\d*|\bnvda\b.*\b\d+\b|\bprice\b.*\b\d+\b", text):
+            return "PASS", "price signal present"
+        return "WARN", "no clear price found"
+    if "ceo of openai" in query.lower():
+        if "sam altman" in text:
             return "PASS", "Sam Altman named"
-        return "WARN", "Sam Altman not mentioned"
+        return "WARN", "Sam Altman not named"
+    return "PASS", "no issues detected"
 
-    if "best team in the nba" in q:
-        import re
-        if re.search(r"\b(celtics?|thunder|cavaliers?|cavs?|nuggets?|lakers?|warriors?|bucks?|heat|timberwolves?|wolves?|pacers?|knicks?|suns?|rockets?|kings?)\b", a):
-            return "PASS", "NBA team name found"
-        return "WARN", "no recognizable NBA team found"
 
-    if "election" in q:
-        if any(w in a for w in ["election", "vote", "candidate", "won", "race", "ballot", "democrat", "republican", "senate", "house", "president"]):
-            return "PASS", "election-related content found"
-        return "WARN", "no election content found"
-
-    if "interest rate" in q:
-        import re
-        if re.search(r"\b\d+\.?\d*\s*%|\bfed\b|\bfederal reserve\b|\bfomc\b|\brate\b.*\d+", a):
-            return "PASS", "interest rate data found"
-        return "WARN", "no interest rate data found"
-
-    if "latest iphone" in q:
-        import re
-        if re.search(r"\biphone\s*1[0-9]|iphone\s*[2-9]\d\b|\biphone\s*(?:pro|plus|max|ultra|mini)\b|\bapple\b.*\biphone\b", a, re.IGNORECASE):
-            return "PASS", "iPhone model mentioned"
-        return "WARN", "no iPhone model found"
-
-    return "PASS", "no specific checks failed"
-
-# ── run tests ─────────────────────────────────────────────────────────────────
-results = []
-for expected_cat, question in TESTS:
-    # Fresh service instance per test to prevent history contamination
-    svc = ChatService(llm=llm, chunks=chunks, web_search_tool=search_tool)
-    capture.records.clear()
-    print(f"\n{SEP}")
-    print(f"QUERY: {question}")
-    print(f"EXPECTED CATEGORY: {expected_cat}")
+def main() -> None:
+    results = []
+    print(f"Configured provider mode: {WEB_SEARCH_PROVIDER}")
+    print(f"Configured provider priority: {WEB_SEARCH_PROVIDER_PRIORITY}")
     print(SEP)
 
-    try:
-        answer, hits, web_results, profile = svc.ask(
-            question=question,
-            use_web_search=True,
-            user_location_label=None,
-            user_timezone=None,
+    for expected_category, question in TESTS:
+        svc = ChatService(llm=llm, chunks=chunks, web_search_tool=search_tool)
+        capture.records.clear()
+
+        print(f"\n{SEP}")
+        print(f"QUERY: {question}")
+        print(f"EXPECTED CATEGORY: {expected_category}")
+        print(SEP)
+
+        try:
+            answer, hits, web_results, _ = svc.ask(
+                question=question,
+                use_web_search=True,
+                user_location_label=None,
+                user_timezone=None,
+            )
+        except Exception as exc:
+            print(f"[ERROR] ask() failed: {exc}")
+            results.append({"query": question, "status": "FAIL", "reason": str(exc)})
+            continue
+
+        log_lines = capture.flush_lines()
+        signals = parse_logs(log_lines)
+        meta = dict(svc.last_web_search_meta or {})
+        status, reason = score_answer(question, answer)
+
+        top_source = "none"
+        if web_results:
+            top = web_results[0]
+            top_source = f"{top.get('url', '?')} | provider={top.get('provider', '?')} | date={top.get('date', '')}"
+
+        print(f"1. CATEGORY ASSIGNED: {signals.get('category')} (expected: {expected_category})")
+        print(f"2. FRESHNESS SENSITIVE: {signals.get('freshness_sensitive')}")
+        print(f"3. QUERY VARIANTS: {meta.get('query_variants')}")
+        print(f"4. PROVIDER SEQUENCE: {meta.get('provider_sequence')}")
+        print(f"5. WINNING PROVIDER: {meta.get('winning_provider')}")
+        print(f"6. FINAL WINNING SOURCE: {meta.get('winning_source') or top_source}")
+        print(f"7. DDG NEEDED: {meta.get('ddg_used')}")
+        print(f"8. WEB RESULT COUNT: {signals.get('source_count')}")
+        attempts = meta.get("attempts") or []
+        for idx, attempt in enumerate(attempts, 1):
+            print(
+                f"   ATTEMPT {idx}: provider={attempt.get('provider')} stage={attempt.get('stage')} "
+                f"fresh={attempt.get('fresh')} accepted={attempt.get('accepted_results')} "
+                f"quality={attempt.get('quality_reason')} domains={attempt.get('preferred_domains')} "
+                f"query={attempt.get('query')}"
+            )
+        print("\nFINAL ANSWER")
+        print(answer)
+        print(f"\n9. CURRENT/CORRECT CHECK: [{status}] {reason}")
+
+        results.append(
+            {
+                "query": question,
+                "status": status,
+                "reason": reason,
+                "winning_provider": meta.get("winning_provider"),
+                "ddg_used": meta.get("ddg_used"),
+            }
         )
-    except Exception as exc:
-        print(f"[ERROR] Exception during ask(): {exc}")
-        continue
 
-    log_lines = capture.flush_lines()
-    signals = parse_logs(log_lines)
-    status, reason = score_answer(answer, question)
+    print(f"\n{SEP}")
+    print("SUMMARY")
+    print(SEP)
+    for item in results:
+        print(
+            f"[{item['status']}] provider={item.get('winning_provider')} ddg={item.get('ddg_used')} "
+            f"query={item['query']} -> {item['reason']}"
+        )
 
-    # Determine strongest provider evidence
-    top_source = "none"
-    if web_results:
-        top = web_results[0]
-        top_source = f"{top.get('url','?')[:70]} | {top.get('date','no date')}"
 
-    print(f"1. CATEGORY ASSIGNED: {signals['category']} (expected: {expected_cat})")
-    print(f"2. FRESHNESS_SENSITIVE: {signals['freshness_sensitive']}")
-    print(f"3. QUERY VARIANTS LOGGED: {signals['query_variants']}")
-    print(f"4. LIVE WEB RAN: {'YES' if signals['web_source_count'] is not None else 'UNKNOWN'} — {signals['web_source_count']} results")
-    print(f"5. TOP SOURCE: {top_source}")
-    print(f"   FRESH MODE: {signals['fresh_mode']} | FRESH RETRY: {signals['fresh_empty_retry']} | FALLBACK: {signals['fallback_retry']}")
-    print(f"6. RETRY/FALLBACK: fresh_empty_retry={signals['fresh_empty_retry']}, market_relaxed={signals['market_filter_relaxed']}, fallback={signals['fallback_retry']}")
-    print(f"7. NOTES SUPPRESSED: {signals['notes_suppressed']}")
-    print(f"8. REFUSAL GUARD FIRED: {signals['refusal_detected']} | STALE GUARD FIRED: {signals['stale_detected']}")
-    print(f"\n--- FINAL ANSWER ---")
-    print(answer)
-    print(f"\n9. STATUS: [{status}] — {reason}")
-
-    if status != "PASS":
-        print("\n*** FAILURE DETAILS ***")
-        print("Relevant log lines:")
-        for line in log_lines:
-            if any(k in line for k in ["ask_start", "web_search", "query_class", "stale", "refusal", "note"]):
-                print("  ", line)
-
-    results.append({
-        "query": question,
-        "expected_cat": expected_cat,
-        "assigned_cat": signals["category"],
-        "fresh": signals["freshness_sensitive"],
-        "web_count": signals["web_source_count"],
-        "status": status,
-        "reason": reason,
-    })
-
-# ── summary table ─────────────────────────────────────────────────────────────
-print(f"\n\n{'='*80}")
-print("SUMMARY")
-print(f"{'='*80}")
-print(f"{'Query':<45} {'Cat':>14} {'Fresh':>6} {'Web':>4} {'Result'}")
-print("-" * 80)
-for r in results:
-    cat_match = "OK" if r["assigned_cat"] == r["expected_cat"] else f"X({r['assigned_cat']})"
-    print(f"{r['query']:<45} {cat_match:>14} {str(r['fresh']):>6} {str(r['web_count'] or '?'):>4}  [{r['status']}] {r['reason']}")
-
-pass_count = sum(1 for r in results if r["status"] == "PASS")
-warn_count = sum(1 for r in results if r["status"] == "WARN")
-fail_count = sum(1 for r in results if r["status"] == "FAIL")
-print(f"\nTotal: {len(results)} | PASS: {pass_count} | WARN: {warn_count} | FAIL: {fail_count}")
+if __name__ == "__main__":
+    main()

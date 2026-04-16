@@ -21,8 +21,10 @@ Keep the app online 24/7 and keep live data (news/stocks) updated even when your
 - `LIVE_UPDATE_INTERVAL_SECONDS`: refresh interval (default `300`).
 - `STOCK_SYMBOLS`: comma-separated stock list, e.g. `AAPL,MSFT,SPY`.
 - `NEWS_FEED_URLS`: optional comma-separated RSS feeds.
-- `WEB_SEARCH_PROVIDER`: use `multi` for fallback search providers.
-- `BRAVE_SEARCH_API_KEY`: optional (improves live web coverage when set).
+- `WEB_SEARCH_PROVIDER`: `auto`/`multi` uses provider routing, `duckduckgo` forces legacy DDG-only mode, `disabled` turns web search off.
+- `WEB_SEARCH_PROVIDER_PRIORITY`: comma-separated provider order, default `brave,tavily,ddg,wikipedia`.
+- `BRAVE_SEARCH_API_KEY`: optional primary live search provider.
+- `TAVILY_API_KEY`: optional primary live search provider.
 - `DB_PATH`: shared database file path if both API and worker run on same machine.
 - `CREATOR_EMAIL`: your creator/admin email for unlimited access.
 - `STRIPE_SECRET_KEY`: Stripe secret API key (`sk_live_...` in production).

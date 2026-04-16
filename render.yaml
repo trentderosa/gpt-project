@@ -25,7 +25,11 @@ services:
         value: "AAPL,MSFT,SPY,TSLA,NVDA"
       - key: WEB_SEARCH_PROVIDER
         value: multi
+      - key: WEB_SEARCH_PROVIDER_PRIORITY
+        value: brave,tavily,ddg,wikipedia
       - key: BRAVE_SEARCH_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
         sync: false
       - key: APP_BASE_URL
         value: https://cortex-engine.com

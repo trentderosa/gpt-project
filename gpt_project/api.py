@@ -23,16 +23,21 @@ from pydantic import BaseModel, Field
 import stripe
 
 from .core.chat_service import ChatService
-from .core.config import DEFAULT_MODEL, KNOWLEDGE_DIR, WEB_DIR, WEB_SEARCH_PROVIDER
+from .core.config import (
+    BRAVE_SEARCH_API_KEY,
+    DEFAULT_MODEL,
+    KNOWLEDGE_DIR,
+    TAVILY_API_KEY,
+    WEB_DIR,
+    WEB_SEARCH_PROVIDER,
+    WEB_SEARCH_PROVIDER_PRIORITY,
+)
 from .core.llm_wrapper import LLMWrapper
 from .core.live_data_store import LiveDataStore
 from .core.retriever import load_knowledge_chunks
 from .core.search_tool import (
-    BraveSearchTool,
     CompositeWebSearchTool,
-    DisabledWebSearchTool,
-    DuckDuckGoSearchTool,
-    WikipediaSearchTool,
+    build_search_tool,
 )
 from .core.storage import ChatStorage
 from .jobs.updater import run_once
@@ -61,14 +66,12 @@ storage = ChatStorage()
 live_store = LiveDataStore()
 chunks = load_knowledge_chunks(KNOWLEDGE_DIR)
 llm = LLMWrapper(model=DEFAULT_MODEL)
-if WEB_SEARCH_PROVIDER in {"duckduckgo", "multi", "auto"}:
-    providers = [DuckDuckGoSearchTool(), WikipediaSearchTool()]
-    brave_key = (os.getenv("BRAVE_SEARCH_API_KEY") or "").strip()
-    if brave_key:
-        providers.insert(0, BraveSearchTool(brave_key))
-    search_tool = CompositeWebSearchTool(providers=providers)
-else:
-    search_tool = DisabledWebSearchTool()
+search_tool = build_search_tool(
+    web_search_provider=WEB_SEARCH_PROVIDER,
+    provider_priority=[part.strip() for part in WEB_SEARCH_PROVIDER_PRIORITY.split(",") if part.strip()],
+    brave_api_key=BRAVE_SEARCH_API_KEY,
+    tavily_api_key=TAVILY_API_KEY,
+)
 chat_service = ChatService(llm=llm, chunks=chunks, web_search_tool=search_tool)
 embedded_scheduler: BackgroundScheduler | None = None
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -650,6 +653,8 @@ def health() -> dict:
         "status": "ok",
         "knowledge_chunks": len(chunks),
         "web_search_provider": WEB_SEARCH_PROVIDER,
+        "web_search_provider_priority": WEB_SEARCH_PROVIDER_PRIORITY,
+        "configured_search_providers": search_tool.available_providers() if isinstance(search_tool, CompositeWebSearchTool) else [],
         "live_updates_enabled": live_updates_enabled,
         "run_updater_in_api": run_updater_in_api,
     }
