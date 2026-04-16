@@ -253,12 +253,6 @@ STALE_ANSWER_HINTS = {
     "i don't have the latest specific",
     "i don't have access to real-time",
     "i cannot access real-time",
-    # Known stale leadership facts that signal a 2023-era answer
-    "emmett shear",         # OpenAI interim CEO for ~4 days in Nov 2023
-    "mira murati",          # OpenAI interim CEO briefly in Nov 2023
-    "bob chapek",           # Disney CEO fired Nov 2022
-    "adam neumann",         # WeWork CEO 2019
-    "jack dorsey",          # Twitter CEO, left 2021
 }
 
 NAME_PATTERNS = [
@@ -379,7 +373,9 @@ class ChatService:
             return True
         return bool(_WEB_EXEMPT_RE.search(q))
 
-    # Regex matching major recurring sports championship events.
+    # Compiled class-level regex patterns — avoid per-call compilation overhead.
+
+    # Major recurring sports championship events.
     _SPORTS_EVENT_RE = re.compile(
         r'\b(?:super bowl|world series|stanley cup|march madness|nba finals?|world cup(?! of)|'
         r'masters(?:\s+(?:tournament|golf))?|pga championship|us open|british open|the open|'
@@ -387,6 +383,36 @@ class ChatService:
         r'olympic games?|olympics?|nfl draft|nba draft|'
         r'ncaa championship|college football playoff|rose bowl|orange bowl|sugar bowl|fiesta bowl)\b',
         re.IGNORECASE,
+    )
+
+    # Leadership role keywords.
+    _LEADERSHIP_RE = re.compile(
+        r'\b(?:ceo|president|cfo|cto|head of|founder of|who (?:runs|leads|is the (?:ceo|president|head|chief)))\b',
+        re.IGNORECASE,
+    )
+
+    # Weather location extraction — strips trailing time qualifiers from the capture group.
+    _WEATHER_LOCATION_RE = re.compile(
+        r'\b(?:weather|temp(?:erature)?|forecast)\s+(?:in|for|at)\s+'
+        r'([A-Za-z0-9.,\-\s]{2,80}?)(?:\s+(?:today|tonight|now|right now|this week|this morning|this afternoon|tomorrow|currently))?\s*$',
+        re.IGNORECASE,
+    )
+    _WEATHER_LOCATION_FALLBACK_RE = re.compile(
+        r'\bin\s+([A-Za-z0-9.,\-\s]{2,80})\s*$',
+        re.IGNORECASE,
+    )
+    _WEATHER_TIME_QUALIFIER_RE = re.compile(
+        r'\s+(?:today|tonight|now|right now|this week|this morning|this afternoon|tomorrow|currently)\s*$',
+        re.IGNORECASE,
+    )
+
+    # Market snapshot detection — single compiled alternation for _answer_contains_market_snapshot.
+    _MARKET_SNAPSHOT_RE = re.compile(
+        r'latest market snapshot'
+        r'|\b[a-z0-9\^]{1,6}\s*:\s*(?:price|close)\s*='
+        r'|\$[\d,]+\.?\d{0,2}\b'
+        r'|\btrading\s+at\s+[\d,]+\.?\d{0,2}\b'
+        r'|\bprice\s+(?:is|of|at|:)\s+\$?[\d,]+\.?\d{0,2}\b',
     )
 
     def _classify_query(self, question: str) -> str:
@@ -400,7 +426,7 @@ class ChatService:
             return "sports_event"
         if self._needs_sports_context(question):
             return "sports"
-        if re.search(r'\b(?:ceo|president|cfo|cto|head of|founder of|who (?:runs|leads|is the (?:ceo|president|head|chief)))\b', q):
+        if self._LEADERSHIP_RE.search(q):
             return "leadership"
         if self._needs_news_context(question):
             return "news"
@@ -408,14 +434,15 @@ class ChatService:
             return "current_events"
         return "general"
 
-    def _web_queries(self, question: str) -> list[str]:
+    def _web_queries(self, question: str, category: str | None = None) -> list[str]:
         query = question.strip()
         if not query:
             return []
         q_lower = query.lower()
         year = datetime.now().year
         clean = re.sub(r'[?!]+$', '', query).strip()
-        category = self._classify_query(query)
+        if category is None:
+            category = self._classify_query(query)
 
         logger.info("query_classified category=%s question=%r", category, query[:100])
 
@@ -461,19 +488,16 @@ class ChatService:
             primary = f"{stripped} {year} winner result"
 
         # Leadership queries: "who is the CEO of X", "CEO of OpenAI", etc.
-        # Use "CEO X" direct form instead of "who is the CEO of X" — cleaner signal for search.
+        # Direct "{Org} CEO current {year}" form produces better search results than "who is the CEO of X".
         elif category == "leadership":
-            # Extract the org/person from "who is the CEO of X" patterns
             ceo_match = re.search(r'\b(?:ceo|president|cfo|cto|head|founder)\s+(?:of\s+)?([A-Za-z0-9 &.,\-]{2,50})', clean, re.IGNORECASE)
             org = ceo_match.group(1).strip() if ceo_match else clean
             primary = f"{org} CEO current {year}"
 
-        # Weather: let web search results carry the answer when no location coords are available.
+        # Weather: use existing location extraction so we share the same stripping logic.
         elif category == "weather":
-            # Extract location cleanly — strip trailing time words so geocoding gets a clean city name.
-            loc_match = re.search(r'\b(?:weather|forecast|temperature)\s+(?:in|for|at)\s+([A-Za-z ,.\-]+?)(?:\s+(?:today|tonight|now|this week|tomorrow|right now))?\s*$', clean, re.IGNORECASE)
-            if loc_match:
-                loc = loc_match.group(1).strip()
+            loc = self._extract_weather_location_from_question(clean)
+            if loc:
                 primary = f"weather {loc} today forecast temperature"
             else:
                 primary = f"{clean} weather forecast today"
@@ -595,11 +619,13 @@ class ChatService:
         )
         return "\n".join(lines) + "\n\n"
 
-    def _search_live_web(self, question: str, max_results: int = 5) -> list[dict]:
+    def _search_live_web(self, question: str, max_results: int = 5, category: str | None = None, is_fresh: bool | None = None) -> list[dict]:
         merged: list[dict] = []
         seen_urls: set[str] = set()
         market_query = self._needs_market_context(question)
-        fresh = self._is_freshness_sensitive(question)
+        if is_fresh is None:
+            is_fresh = self._is_freshness_sensitive(question)
+        fresh = is_fresh
 
         if fresh:
             logger.info("web_search_fresh_mode question=%r", question[:100])
@@ -620,16 +646,16 @@ class ChatService:
                 merged.append(item)
 
         # Primary pass: use time-limited search for freshness-sensitive queries.
-        for query in self._web_queries(question):
+        for query in self._web_queries(question, category=category):
             _collect(query, use_fresh=fresh)
             if len(merged) >= max_results:
                 logger.info("web_search_complete fresh=%s source_count=%d", fresh, len(merged))
                 return self._rank_web_results(merged[:max_results], question)
 
-        # If fresh-mode returned nothing, retry the same queries WITHOUT the time limit.
+        # If fresh-mode returned nothing, retry WITHOUT the time limit.
         if not merged and fresh:
             logger.info("web_search_fresh_empty_retrying_no_timelimit question=%r", question[:100])
-            for query in self._web_queries(question)[:2]:
+            for query in self._web_queries(question, category=category)[:2]:
                 _collect(query, use_fresh=False)
                 if len(merged) >= max_results:
                     break
@@ -637,7 +663,8 @@ class ChatService:
         # If market filter dropped everything, retry top query without the filter.
         if not merged and market_query:
             logger.info("web_search_market_filter_relaxed question=%r", question[:100])
-            top_query = self._web_queries(question)[0] if self._web_queries(question) else question
+            queries = self._web_queries(question, category=category)
+            top_query = queries[0] if queries else question
             try:
                 items = self.web_search_tool.search(top_query, max_results=max_results, fresh=False)
                 for item in items:
@@ -929,20 +956,12 @@ class ChatService:
         q = (question or "").strip()
         if not q:
             return None
-        # Strip trailing time qualifiers before matching location.
-        q_clean = re.sub(r'\s+(?:today|tonight|now|right now|this week|this morning|this afternoon|tomorrow|currently)\s*$', '', q, flags=re.IGNORECASE).strip()
-        patterns = [
-            re.compile(r"\b(?:weather|temp(?:erature)?|forecast)\s+(?:in|for|at)\s+([A-Za-z0-9.,\-\s]{2,80?}?)(?:\s+(?:today|tonight|now|right now|this week|tomorrow))?\s*$", re.IGNORECASE),
-            re.compile(r"\b(?:weather|temp(?:erature)?|forecast)\s+(?:in|for|at)\s+([A-Za-z0-9.,\-\s]{2,80})\s*$", re.IGNORECASE),
-            re.compile(r"\bin\s+([A-Za-z0-9.,\-\s]{2,80})\s*$", re.IGNORECASE),
-        ]
-        for pattern in patterns:
+        q_clean = self._WEATHER_TIME_QUALIFIER_RE.sub('', q).strip()
+        for pattern in (self._WEATHER_LOCATION_RE, self._WEATHER_LOCATION_FALLBACK_RE):
             for candidate in (q_clean, q):
                 match = pattern.search(candidate)
                 if match:
-                    location = match.group(1).strip(" .,!?:;")
-                    # Strip any trailing time qualifiers that slipped through
-                    location = re.sub(r'\s+(?:today|tonight|now|right now|this week|this morning|this afternoon|tomorrow|currently)\s*$', '', location, flags=re.IGNORECASE).strip(" .,!?:;")
+                    location = self._WEATHER_TIME_QUALIFIER_RE.sub('', match.group(1)).strip(" .,!?:;")
                     if len(location) >= 2:
                         return location
         return None
@@ -1077,9 +1096,10 @@ class ChatService:
             "arm", "pltr", "nflx", "coin",
         ]
         common_hits = [sym.upper() for sym in common if re.search(rf"\b{re.escape(sym)}\b", lowered)]
-        # Company name → ticker mappings
+        # Company name → ticker: iterate longest names first to prevent shorter keys
+        # (e.g. "jp") from shadowing longer matches (e.g. "jp morgan").
         company_hits = []
-        for name, ticker in self._COMPANY_TO_TICKER.items():
+        for name, ticker in sorted(self._COMPANY_TO_TICKER.items(), key=lambda kv: len(kv[0]), reverse=True):
             if name in lowered:
                 company_hits.append(ticker)
         deny = {"I", "A", "AN", "THE", "AND", "OR", "IT", "WE", "YOU"}
@@ -1241,24 +1261,10 @@ class ChatService:
         return (wanted + others)[:5]
 
     def _answer_contains_market_snapshot(self, answer: str) -> bool:
-        text = (answer or "").lower()
-        # Match ticker:close= format (from our market context lines)
-        if "latest market snapshot" in text:
-            return True
-        if re.search(r"\b[a-z0-9\^]{1,6}\s*:\s*(price|close)\s*=", text):
-            return True
-        # Also match prose price mentions: "$197.92", "197.92 per share", "trading at 197", etc.
-        if re.search(r"\$[\d,]+\.?\d{0,2}\b", text):
-            return True
-        if re.search(r"\btrading\s+at\s+[\d,]+\.?\d{0,2}\b", text):
-            return True
-        if re.search(r"\bprice\s+(?:is|of|at|:)\s+\$?[\d,]+\.?\d{0,2}\b", text):
-            return True
-        return False
+        return bool(self._MARKET_SNAPSHOT_RE.search((answer or "").lower()))
 
-    def _market_answer_fallback(self, market_context: str, web_results: list[dict], question: str = "") -> str:
-        requested = self._extract_symbols_from_question(question) if question else []
-        market_lines = self._extract_market_lines(market_context, prefer_symbols=requested)
+    def _market_answer_fallback(self, market_context: str, web_results: list[dict], requested_symbols: list[str] | None = None) -> str:
+        market_lines = self._extract_market_lines(market_context, prefer_symbols=requested_symbols or [])
         if market_lines:
             body = "\n".join(market_lines[:4])
             return f"Here is the latest market snapshot I found:\n{body}\n\nAsk for a specific ticker if you want a deeper breakdown."
@@ -1301,6 +1307,15 @@ class ChatService:
         except Exception:
             return ""
 
+    def _build_note_context_block(self, context: str, question: str, category: str, is_fresh: bool, web_results: list[dict]) -> str:
+        """Return BM25 note context block, suppressed for freshness-sensitive queries with live results."""
+        if not context:
+            return ""
+        if is_fresh and web_results:
+            logger.info("notes_suppressed_freshness_sensitive category=%s web_results=%d", category, len(web_results))
+            return ""
+        return f"Context from local notes:\n{context}\n\n"
+
     def ask(
         self,
         question: str,
@@ -1339,7 +1354,7 @@ class ChatService:
         web_results: list[dict] = []
         _effective_web = use_web_search or (ALWAYS_WEB_SEARCH and not self._is_web_search_exempt(question))
         if _effective_web:
-            web_results = self._search_live_web(question, max_results=5)
+            web_results = self._search_live_web(question, max_results=5, category=category, is_fresh=is_fresh)
 
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         effective_history = history if history is not None else self.history
@@ -1347,13 +1362,11 @@ class ChatService:
         profile_context = self._profile_context_block(updated_profile)
         messages.extend(self._trim_history(effective_history))
         runtime_context = ""
-        if self._needs_runtime_time_context(question) or self._is_current_events_query(question) or self._is_freshness_sensitive(question):
-            runtime_context = (
-                self._runtime_time_context(
-                    user_timezone=user_timezone,
-                    user_utc_offset_minutes=user_utc_offset_minutes,
-                    user_location_label=user_location_label,
-                )
+        if self._needs_runtime_time_context(question) or is_fresh:
+            runtime_context = self._runtime_time_context(
+                user_timezone=user_timezone,
+                user_utc_offset_minutes=user_utc_offset_minutes,
+                user_location_label=user_location_label,
             )
         weather_context = ""
         if self._needs_weather_context(question):
@@ -1372,17 +1385,10 @@ class ChatService:
             if topic_news:
                 news_context += topic_news
         web_context = self._build_web_context_block(web_results)
-        note_context_block = ""
-        # Suppress BM25 note context for freshness-sensitive queries when live web results exist.
-        # Local notes are static and can inject outdated facts that compete with live search results.
-        if context and not (self._is_freshness_sensitive(question) and web_results):
-            note_context_block = f"Context from local notes:\n{context}\n\n"
-        elif context and self._is_freshness_sensitive(question) and web_results:
-            logger.info("notes_suppressed_freshness_sensitive category=%s web_results=%d", category, len(web_results))
-
+        note_context_block = self._build_note_context_block(context, question, category, is_fresh, web_results)
         has_live_signal = bool(web_results) or bool(market_context.strip()) or bool(news_context.strip()) or bool(weather_context.strip())
         anti_refusal = "" if has_strong_note_context else "Instruction: If local notes do not cover this, answer from general knowledge.\n\n"
-        anti_stale = "Instruction: Use the live context provided above. Do not reference training cutoff dates.\n\n" if self._is_freshness_sensitive(question) and has_live_signal else ""
+        anti_stale = "Instruction: Use the live context provided above. Do not reference training cutoff dates.\n\n" if is_fresh and has_live_signal else ""
 
         messages.append(
             {
@@ -1458,7 +1464,7 @@ class ChatService:
             )
             if not has_live_signal:
                 if self._needs_market_context(question):
-                    answer = self._market_answer_fallback(market_context=market_context, web_results=web_results, question=question)
+                    answer = self._market_answer_fallback(market_context=market_context, web_results=web_results, requested_symbols=self._extract_symbols_from_question(question))
                 else:
                     stale_fix_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
                     stale_fix_messages.extend(self._trim_history(effective_history))
@@ -1498,7 +1504,7 @@ class ChatService:
                 answer = self.llm.chat(messages=stale_fix_messages, model=model)
 
         if self._needs_market_context(question):
-            forced = self._market_answer_fallback(market_context=market_context, web_results=web_results, question=question)
+            forced = self._market_answer_fallback(market_context=market_context, web_results=web_results, requested_symbols=self._extract_symbols_from_question(question))
             if forced and (self._looks_like_market_deflection(answer) or not self._answer_contains_market_snapshot(answer)):
                 answer = forced
 
@@ -1523,20 +1529,20 @@ class ChatService:
                 self.history.append({"role": "assistant", "content": short_reply})
             yield ("done", {"answer": short_reply, "hits": [], "web_results": [], "updated_profile": up})
             return
-        stream_category = self._classify_query(question)
-        stream_is_fresh = self._is_freshness_sensitive(question)
-        logger.info("ask_stream_start category=%s freshness_sensitive=%s question=%r", stream_category, stream_is_fresh, question[:100])
+        s_category = self._classify_query(question)
+        s_fresh = self._is_freshness_sensitive(question)
+        logger.info("ask_stream_start category=%s freshness_sensitive=%s question=%r", s_category, s_fresh, question[:100])
         hits = retrieve_context(question, self.chunks, top_k=TOP_K)
         has_strong = bool(hits and hits[0][0] >= MIN_SCORE)
         context = ("\n\n".join(f"[source={src} score={sc:.3f}]\n{txt}" for sc, src, txt in hits) if has_strong else "")
         _effective_web = use_web_search or (ALWAYS_WEB_SEARCH and not self._is_web_search_exempt(question))
-        web_results = self._search_live_web(question, max_results=5) if _effective_web else []
+        web_results = self._search_live_web(question, max_results=5, category=s_category, is_fresh=s_fresh) if _effective_web else []
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         eff_h = history if history is not None else self.history
         updated_profile = self._merge_user_profile(user_profile or {}, question, eff_h)
         profile_ctx = self._profile_context_block(updated_profile)
         messages.extend(self._trim_history(eff_h))
-        runtime_ctx = self._runtime_time_context(user_timezone=user_timezone, user_utc_offset_minutes=user_utc_offset_minutes, user_location_label=user_location_label) if (self._needs_runtime_time_context(question) or self._is_current_events_query(question) or self._is_freshness_sensitive(question)) else ""
+        runtime_ctx = self._runtime_time_context(user_timezone=user_timezone, user_utc_offset_minutes=user_utc_offset_minutes, user_location_label=user_location_label) if (self._needs_runtime_time_context(question) or s_fresh) else ""
         weather_ctx = self._weather_context(user_location_label=user_location_label, user_timezone=user_timezone, question=question) if self._needs_weather_context(question) else ""
         market_ctx = self._live_market_context(question=question) if self._needs_market_context(question) else ""
         news_ctx = ""
@@ -1546,14 +1552,10 @@ class ChatService:
             if tn:
                 news_ctx += tn
         web_ctx = self._build_web_context_block(web_results)
-        # Suppress BM25 note context for freshness-sensitive queries when live web results exist.
-        _notes_suppressed = bool(context and self._is_freshness_sensitive(question) and web_results)
-        if _notes_suppressed:
-            logger.info("notes_suppressed_freshness_sensitive category=%s web_results=%d", stream_category, len(web_results))
-        note_blk = ("Context from local notes:\n" + context + "\n\n") if (context and not _notes_suppressed) else ""
+        note_blk = self._build_note_context_block(context, question, s_category, s_fresh, web_results)
         live = bool(web_results) or bool(market_ctx.strip()) or bool(news_ctx.strip()) or bool(weather_ctx.strip())
         anti_r = "" if has_strong else "Instruction: If local notes do not cover this, answer from general knowledge.\n\n"
-        anti_s = ("Instruction: Use the live context provided above. Do not reference training cutoff dates.\n\n" if self._is_freshness_sensitive(question) and live else "")
+        anti_s = ("Instruction: Use the live context provided above. Do not reference training cutoff dates.\n\n" if s_fresh and live else "")
         messages.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+web_ctx+profile_ctx+(uploaded_file_context or "")+note_blk+anti_r+anti_s+"User question:\n"+question})
         streamed = []
         try:
@@ -1583,7 +1585,7 @@ class ChatService:
             logger.info("stale_answer_detected_stream question=%r — rerunning with web context", question[:100])
             if not live:
                 if self._needs_market_context(question):
-                    answer = self._market_answer_fallback(market_context=market_ctx, web_results=web_results, question=question)
+                    answer = self._market_answer_fallback(market_context=market_ctx, web_results=web_results, requested_symbols=self._extract_symbols_from_question(question))
                 else:
                     sf = [{"role": "system", "content": SYSTEM_PROMPT}]
                     sf.extend(self._trim_history(eff_h))
@@ -1597,7 +1599,7 @@ class ChatService:
                 answer = self.llm.chat(messages=sf, model=model)
                 yield ("replace", answer)
         if self._needs_market_context(question):
-            forced = self._market_answer_fallback(market_context=market_ctx, web_results=web_results, question=question)
+            forced = self._market_answer_fallback(market_context=market_ctx, web_results=web_results, requested_symbols=self._extract_symbols_from_question(question))
             if forced and (self._looks_like_market_deflection(answer) or not self._answer_contains_market_snapshot(answer)):
                 answer = forced
                 yield ("replace", answer)
