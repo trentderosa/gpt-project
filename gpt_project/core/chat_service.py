@@ -1807,6 +1807,7 @@ class ChatService:
         user_location_label: str | None = None,
         user_profile: dict | None = None,
         uploaded_file_context: str | None = None,
+        workspace_context: str | None = None,
         model: str | None = None,
     ) -> tuple[str, list[tuple[float, str, str]], list[dict], dict]:
         normalized_question = question.strip().lower()
@@ -1897,6 +1898,7 @@ class ChatService:
                 "content": (
                     f"{runtime_context}"
                     f"{profile_context}"
+                    f"{workspace_context or ''}"
                     f"{uploaded_file_context or ''}"
                     f"{note_context_block}"
                     f"{weather_context}"
@@ -1921,6 +1923,7 @@ class ChatService:
                     "content": (
                         f"{runtime_context}"
                         f"{profile_context}"
+                        f"{workspace_context or ''}"
                         f"{uploaded_file_context or ''}"
                         f"{weather_context}"
                         f"{market_context}"
@@ -1944,6 +1947,7 @@ class ChatService:
                     "content": (
                         f"{runtime_context}"
                         f"{profile_context}"
+                        f"{workspace_context or ''}"
                         f"{uploaded_file_context or ''}"
                         f"{weather_context}"
                         f"{market_context}"
@@ -1975,6 +1979,7 @@ class ChatService:
                             "content": (
                                 f"{runtime_context}"
                                 f"{profile_context}"
+                                f"{workspace_context or ''}"
                                 f"{web_context}"
                                 f"Question: {question}\n\n"
                                 f"{self._live_only_instruction(is_fresh)}"
@@ -1991,6 +1996,7 @@ class ChatService:
                         "content": (
                             f"{runtime_context}"
                             f"{profile_context}"
+                            f"{workspace_context or ''}"
                             f"{weather_context}"
                             f"{market_context}"
                             f"{news_context}"
@@ -2018,6 +2024,7 @@ class ChatService:
     def ask_stream(self, question, history=None, use_web_search=True,
                    user_timezone=None, user_utc_offset_minutes=None,
                    user_location_label=None, user_profile=None, uploaded_file_context=None,
+                   workspace_context=None,
                    model=None):
         normalized_question = question.strip().lower()
         if normalized_question in ACK_MESSAGES:
@@ -2069,7 +2076,7 @@ class ChatService:
             "NEVER respond with only 'could not be verified' or 'check elsewhere' — always provide the actual answer.\n\n"
         ) if s_fresh and _effective_web and not live else ""
         # Prompt order: live web context closest to question for maximum grounding weight.
-        messages.append({"role": "user", "content": runtime_ctx+profile_ctx+(uploaded_file_context or "")+note_blk+weather_ctx+market_ctx+news_ctx+web_ctx+anti_r+anti_s+no_live_push_s+"User question:\n"+question})
+        messages.append({"role": "user", "content": runtime_ctx+profile_ctx+(workspace_context or "")+(uploaded_file_context or "")+note_blk+weather_ctx+market_ctx+news_ctx+web_ctx+anti_r+anti_s+no_live_push_s+"User question:\n"+question})
         streamed = []
         try:
             for token in self.llm.chat_stream(messages=messages, model=model):
@@ -2082,7 +2089,7 @@ class ChatService:
         if self._looks_like_notes_refusal(answer):
             fbk = [{"role": "system", "content": SYSTEM_PROMPT}]
             fbk.extend(self._trim_history(eff_h))
-            fbk.append({"role": "user", "content": runtime_ctx+profile_ctx+(uploaded_file_context or "")+weather_ctx+market_ctx+news_ctx+web_ctx+"Question: "+question+"\n\n"+self._live_only_instruction(s_fresh)})
+            fbk.append({"role": "user", "content": runtime_ctx+profile_ctx+(workspace_context or "")+(uploaded_file_context or "")+weather_ctx+market_ctx+news_ctx+web_ctx+"Question: "+question+"\n\n"+self._live_only_instruction(s_fresh)})
             answer = self.llm.chat(messages=fbk, model=model)
             yield ("replace", answer)
 
@@ -2091,7 +2098,7 @@ class ChatService:
             logger.info("refusal_output_detected_stream question=%r — regenerating", question[:100])
             regen = [{"role": "system", "content": SYSTEM_PROMPT}]
             regen.extend(self._trim_history(eff_h))
-            regen.append({"role": "user", "content": runtime_ctx+profile_ctx+(uploaded_file_context or "")+weather_ctx+market_ctx+news_ctx+web_ctx+"Question: "+question+"\n\nGive a direct, concrete, useful answer. Do not say you cannot access real-time or live data. "+self._live_only_instruction(s_fresh)})
+            regen.append({"role": "user", "content": runtime_ctx+profile_ctx+(workspace_context or "")+(uploaded_file_context or "")+weather_ctx+market_ctx+news_ctx+web_ctx+"Question: "+question+"\n\nGive a direct, concrete, useful answer. Do not say you cannot access real-time or live data. "+self._live_only_instruction(s_fresh)})
             answer = self.llm.chat(messages=regen, model=model)
             yield ("replace", answer)
         if s_fresh and self._looks_stale_current_answer(answer):
@@ -2102,13 +2109,13 @@ class ChatService:
                 else:
                     sf = [{"role": "system", "content": SYSTEM_PROMPT}]
                     sf.extend(self._trim_history(eff_h))
-                    sf.append({"role": "user", "content": runtime_ctx+profile_ctx+web_ctx+"Question: "+question+"\n\n"+self._live_only_instruction(s_fresh)})
+                    sf.append({"role": "user", "content": runtime_ctx+profile_ctx+(workspace_context or "")+web_ctx+"Question: "+question+"\n\n"+self._live_only_instruction(s_fresh)})
                     answer = self.llm.chat(messages=sf, model=model)
                 yield ("replace", answer)
             else:
                 sf = [{"role": "system", "content": SYSTEM_PROMPT}]
                 sf.extend(self._trim_history(eff_h))
-                sf.append({"role": "user", "content": runtime_ctx+profile_ctx+weather_ctx+market_ctx+news_ctx+web_ctx+"Question: "+question+"\n\nRewrite your answer using the LIVE WEB RESULTS above as the primary source. Do not use training memory for current facts. Do not mention training cutoff dates."})
+                sf.append({"role": "user", "content": runtime_ctx+profile_ctx+(workspace_context or "")+weather_ctx+market_ctx+news_ctx+web_ctx+"Question: "+question+"\n\nRewrite your answer using the LIVE WEB RESULTS above as the primary source. Do not use training memory for current facts. Do not mention training cutoff dates."})
                 answer = self.llm.chat(messages=sf, model=model)
                 yield ("replace", answer)
         if self._needs_market_context(question):

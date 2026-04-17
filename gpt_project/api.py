@@ -40,6 +40,11 @@ from .core.search_tool import (
     build_search_tool,
 )
 from .core.storage import ChatStorage
+from .core.workspace_memory import (
+    build_file_memory_item,
+    build_workspace_summary,
+    extract_workspace_memory_items,
+)
 from .jobs.updater import run_once
 
 
@@ -299,6 +304,11 @@ def _extract_image_prompt(raw_message: str) -> str | None:
 
 class CreateConversationResponse(BaseModel):
     conversation_id: str
+    workspace_id: str | None = None
+
+
+class CreateConversationRequest(BaseModel):
+    workspace_id: str | None = None
 
 
 SUPPORTED_MODELS = {"gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"}
@@ -307,6 +317,7 @@ SUPPORTED_MODELS = {"gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"}
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=MAX_MESSAGE_CHARS)
     conversation_id: str | None = None
+    workspace_id: str | None = None
     use_web_search: bool = True
     user_timezone: str | None = None
     user_utc_offset_minutes: int | None = None
@@ -316,6 +327,7 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     conversation_id: str
+    workspace_id: str | None = None
     answer: str
     retrieved_sources: list[dict]
     web_results: list[dict]
@@ -324,6 +336,7 @@ class ChatResponse(BaseModel):
 
 class ConversationResponse(BaseModel):
     conversation_id: str
+    workspace_id: str | None = None
     messages: list[dict]
 
 
@@ -341,6 +354,7 @@ class UploadResponse(BaseModel):
     filename: str
     media_type: str
     extracted_preview: str
+    workspace_id: str | None = None
 
 
 class AuthRequest(BaseModel):
@@ -484,6 +498,10 @@ def _ensure_creator_account(reason: str) -> dict | None:
     return synced
 
 
+def _creator_runtime_ready() -> bool:
+    return bool(CREATOR_EMAIL and CREATOR_PASSWORD)
+
+
 def _build_uploaded_file_context(uploaded_files: list[dict]) -> str:
     if not uploaded_files:
         return ""
@@ -555,15 +573,141 @@ def _plan_from_price_id(price_id: str) -> str:
 
 
 def _conversation_access_check(conversation_id: str, user: dict | None) -> None:
-    if not storage.conversation_exists(conversation_id):
+    conversation = storage.get_conversation_record(conversation_id)
+    if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found.")
-    owner = storage.conversation_owner(conversation_id)
+    workspace_id = conversation.get("workspace_id")
+    if workspace_id:
+        if user is None or not storage.get_workspace_member(workspace_id, int(user["id"])):
+            raise HTTPException(status_code=403, detail="Forbidden for this conversation.")
+        return
+    owner = conversation.get("user_id")
     if owner is None and user is None:
         return
     if owner is None and user is not None:
         raise HTTPException(status_code=403, detail="Forbidden for this conversation.")
     if user is None or int(user["id"]) != int(owner):
         raise HTTPException(status_code=403, detail="Forbidden for this conversation.")
+
+
+def _workspace_access_check(workspace_id: str, user: dict | None) -> dict:
+    if user is None:
+        raise HTTPException(status_code=401, detail="Login required.")
+    workspace = storage.get_workspace(workspace_id)
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found.")
+    membership = storage.get_workspace_member(workspace_id, int(user["id"]))
+    if not membership:
+        raise HTTPException(status_code=403, detail="You are not a member of this workspace.")
+    enriched = dict(workspace)
+    enriched["role"] = membership.get("role")
+    return enriched
+
+
+def _build_personal_knowledge_context(user_id: int) -> str:
+    parts: list[str] = []
+    personal = storage.get_user_knowledge_content(user_id)
+    if personal:
+        snippets = ["[" + f["filename"] + "] " + f["content"][:2000] for f in personal[:5]]
+        parts.append("User's personal notes: " + " | ".join(snippets))
+    return "\n\n".join(parts)
+
+
+def _build_workspace_context_block(
+    workspace: dict | None,
+    question: str,
+    exclude_conversation_id: str | None = None,
+) -> tuple[str, dict]:
+    if not workspace:
+        return "", {"summary": None, "memory_hits": [], "file_hits": []}
+    workspace_id = str(workspace["id"])
+    summary_row = storage.get_workspace_summary(workspace_id)
+    memory_hits = storage.search_workspace_memory(workspace_id, question, limit=6)
+    knowledge_hits = storage.search_workspace_knowledge_content(workspace_id, question, limit=3)
+    upload_hits = storage.search_workspace_uploaded_files(workspace_id, question, limit=3)
+    file_hits = knowledge_hits + [row for row in upload_hits if row.get("filename") not in {hit.get("filename") for hit in knowledge_hits}]
+
+    lines = [f"Workspace context for '{workspace['name']}' (shared across chats in this workspace):"]
+    if summary_row and summary_row.get("summary_text"):
+        lines.append("Workspace summary:")
+        lines.append(summary_row["summary_text"])
+    if memory_hits:
+        lines.append("Relevant workspace memory:")
+        for hit in memory_hits[:5]:
+            lines.append(f"- [{hit['memory_type']}] {hit['content']}")
+    if file_hits:
+        lines.append("Relevant workspace files:")
+        for hit in file_hits[:4]:
+            snippet = str(hit.get("content") or hit.get("extracted_text") or "")[:260]
+            lines.append(f"- [{hit.get('filename', 'file')}] {snippet}")
+    return "\n".join(lines) + "\n\n", {
+        "summary": summary_row,
+        "memory_hits": memory_hits,
+        "file_hits": file_hits,
+    }
+
+
+def _refresh_workspace_summary(workspace: dict, conversation_id: str) -> None:
+    workspace_id = str(workspace["id"])
+    memory_items = storage.list_workspace_memory_items(workspace_id, limit=24)
+    file_items = [build_file_memory_item(row["filename"], row["content"]) for row in storage.get_workspace_knowledge_content(workspace_id)[:3]]
+    file_items.extend(
+        build_file_memory_item(row["filename"], row["extracted_text"])
+        for row in storage.list_workspace_uploaded_files(workspace_id, limit=3)
+    )
+    summary = build_workspace_summary(workspace["name"], memory_items, file_items[:4])
+    storage.upsert_workspace_summary(workspace_id, summary, last_conversation_id=conversation_id)
+
+
+def _ingest_workspace_turn_memory(
+    workspace: dict | None,
+    user_id: int | None,
+    conversation_id: str,
+    user_message_id: int,
+    assistant_message_id: int,
+    question: str,
+    answer: str,
+) -> None:
+    if not workspace or user_id is None:
+        return
+    for item in extract_workspace_memory_items(question, answer, workspace_name=workspace.get("name")):
+        source_message_id = user_message_id if item["memory_type"] in {"task", "preference", "fact"} else assistant_message_id
+        storage.add_workspace_memory_item(
+            workspace_id=str(workspace["id"]),
+            user_id=user_id,
+            source_conversation_id=conversation_id,
+            source_message_id=source_message_id,
+            memory_type=item["memory_type"],
+            title=item["title"],
+            content=item["content"],
+            keywords=item["keywords"],
+            importance=item["importance"],
+        )
+    _refresh_workspace_summary(workspace, conversation_id)
+
+
+def _ingest_workspace_file_memory(
+    workspace: dict | None,
+    user_id: int | None,
+    conversation_id: str | None,
+    filename: str,
+    extracted_text: str,
+) -> None:
+    if not workspace or user_id is None:
+        return
+    item = build_file_memory_item(filename, extracted_text)
+    storage.add_workspace_memory_item(
+        workspace_id=str(workspace["id"]),
+        user_id=user_id,
+        source_conversation_id=conversation_id,
+        source_message_id=None,
+        memory_type=item["memory_type"],
+        title=item["title"],
+        content=item["content"],
+        keywords=item["keywords"],
+        importance=item["importance"],
+    )
+    _refresh_workspace_summary(workspace, conversation_id or "")
 
 
 def _merge_profiles(primary: dict, secondary: dict) -> dict:
@@ -711,6 +855,13 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 @app.on_event("startup")
 def startup_auth_state() -> None:
+    if CREATOR_EMAIL and not CREATOR_PASSWORD:
+        logger.warning(
+            "creator_runtime_incomplete creator_email_configured=%s creator_password_configured=%s bootstrap_configured=%s",
+            True,
+            False,
+            bool(CREATOR_BOOTSTRAP_SECRET),
+        )
     try:
         _ensure_creator_account(reason="startup")
     except Exception:
@@ -758,6 +909,10 @@ def health() -> dict:
         "web_search_provider": WEB_SEARCH_PROVIDER,
         "web_search_provider_priority": WEB_SEARCH_PROVIDER_PRIORITY,
         "configured_search_providers": search_tool.available_providers() if isinstance(search_tool, CompositeWebSearchTool) else [],
+        "creator_email_configured": bool(CREATOR_EMAIL),
+        "creator_password_configured": bool(CREATOR_PASSWORD),
+        "creator_bootstrap_configured": bool(CREATOR_BOOTSTRAP_SECRET),
+        "password_reset_dev_mode": PASSWORD_RESET_DEV_MODE,
         "live_updates_enabled": live_updates_enabled,
         "run_updater_in_api": run_updater_in_api,
     }
@@ -786,30 +941,25 @@ def register(body: AuthRequest, request: Request, response: Response) -> AuthRes
     if email_key and not auth_email_rate_limiter.allow(f"register:{email_key}"):
         raise HTTPException(status_code=429, detail="Too many attempts for this account/email.")
     incoming_email = _normalize_email(body.email)
-    is_creator_registration = False
     if _is_creator_email(incoming_email):
-        if CREATOR_PASSWORD:
-            raise HTTPException(
-                status_code=409,
-                detail="Creator account is managed by server configuration. Use normal login.",
-            )
-        if not CREATOR_BOOTSTRAP_SECRET:
-            raise HTTPException(status_code=503, detail="Creator bootstrap is not configured.")
-        submitted = (body.creator_bootstrap_secret or "").strip()
-        if submitted != CREATOR_BOOTSTRAP_SECRET:
-            raise HTTPException(status_code=403, detail="Creator bootstrap secret is required.")
-        is_creator_registration = True
+        logger.warning(
+            "auth_register_creator_blocked email=%s creator_runtime_ready=%s bootstrap_configured=%s",
+            incoming_email,
+            _creator_runtime_ready(),
+            bool(CREATOR_BOOTSTRAP_SECRET),
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="Creator account uses normal login only. Use the creator password on the login form.",
+        )
     logger.info(
         "auth_register_attempt email=%s creator_email=%s bootstrap=%s",
         incoming_email,
         _is_creator_email(incoming_email),
-        is_creator_registration,
+        False,
     )
     try:
-        if is_creator_registration:
-            user = storage.upsert_creator_user(email=body.email, password=body.password)
-        else:
-            user = storage.create_user(email=body.email, password=body.password)
+        user = storage.create_user(email=body.email, password=body.password)
     except ValueError as exc:
         logger.warning(
             "auth_register_failed email=%s creator_email=%s reason=%s",
@@ -842,9 +992,10 @@ def login(body: AuthRequest, request: Request, response: Response) -> AuthRespon
     if email_key and not auth_email_rate_limiter.allow(f"login:{email_key}"):
         raise HTTPException(status_code=429, detail="Too many attempts for this account/email.")
     logger.info(
-        "auth_login_attempt email=%s creator_email=%s",
+        "auth_login_attempt email=%s creator_email=%s creator_runtime_ready=%s",
         email_key,
         _is_creator_email(email_key),
+        _creator_runtime_ready(),
     )
     user, auth_reason = storage.authenticate_user_detailed(email=body.email, password=body.password)
     if not user and _is_creator_email(email_key) and CREATOR_PASSWORD:
@@ -852,11 +1003,14 @@ def login(body: AuthRequest, request: Request, response: Response) -> AuthRespon
         if ensured:
             user, auth_reason = storage.authenticate_user_detailed(email=body.email, password=body.password)
     if not user:
+        creator_account = storage.get_user_by_email(email_key) if _is_creator_email(email_key) else None
         logger.warning(
-            "auth_login_failed email=%s creator_email=%s reason=%s",
+            "auth_login_failed email=%s creator_email=%s reason=%s creator_runtime_ready=%s creator_account_found=%s",
             email_key,
             _is_creator_email(email_key),
             auth_reason,
+            _creator_runtime_ready(),
+            bool(creator_account),
         )
         raise HTTPException(status_code=401, detail="Invalid email or password.")
     token = storage.create_session(user_id=int(user["id"]), ttl_days=SESSION_TTL_DAYS)
@@ -1169,10 +1323,13 @@ def admin_stats(request: Request) -> dict:
 
 
 @app.post("/conversations", response_model=CreateConversationResponse)
-def create_conversation(request: Request) -> CreateConversationResponse:
+def create_conversation(body: CreateConversationRequest | None = None, request: Request = None) -> CreateConversationResponse:
     user = _current_user(request)
-    conversation_id = storage.create_conversation(user_id=int(user["id"]) if user else None)
-    return CreateConversationResponse(conversation_id=conversation_id)
+    workspace_id = ((body.workspace_id if body else None) or "").strip() or None
+    if workspace_id:
+        _workspace_access_check(workspace_id, user)
+    conversation_id = storage.create_conversation(user_id=int(user["id"]) if user else None, workspace_id=workspace_id)
+    return CreateConversationResponse(conversation_id=conversation_id, workspace_id=workspace_id)
 
 
 @app.post("/upload", response_model=UploadResponse)
@@ -1180,6 +1337,7 @@ async def upload_file(
     request: Request,
     file: UploadFile = File(...),
     conversation_id: str | None = Form(default=None),
+    workspace_id: str | None = Form(default=None),
 ) -> UploadResponse:
     user = _current_user(request)
     if not upload_rate_limiter.allow(_client_key(request)):
@@ -1187,10 +1345,21 @@ async def upload_file(
     if _is_blocked_upload(file.filename, file.content_type):
         raise HTTPException(status_code=400, detail="This file type is not allowed for upload.")
 
+    workspace: dict | None = None
+    resolved_workspace_id = (workspace_id or "").strip() or None
     if conversation_id is None:
-        conversation_id = storage.create_conversation(user_id=int(user["id"]) if user else None)
+        if resolved_workspace_id:
+            workspace = _workspace_access_check(resolved_workspace_id, user)
+        conversation_id = storage.create_conversation(
+            user_id=int(user["id"]) if user else None,
+            workspace_id=resolved_workspace_id,
+        )
     else:
         _conversation_access_check(conversation_id, user)
+        conversation = storage.get_conversation_record(conversation_id)
+        resolved_workspace_id = conversation.get("workspace_id") if conversation else None
+        if resolved_workspace_id:
+            workspace = _workspace_access_check(resolved_workspace_id, user)
 
     payload = await file.read()
     if not payload:
@@ -1215,12 +1384,21 @@ async def upload_file(
         media_type=file.content_type or "application/octet-stream",
         extracted_text=extracted,
     )
+    if workspace and user:
+        _ingest_workspace_file_memory(
+            workspace=workspace,
+            user_id=int(user["id"]),
+            conversation_id=conversation_id,
+            filename=_safe_filename(file.filename),
+            extracted_text=extracted,
+        )
     return UploadResponse(
         conversation_id=conversation_id,
         file_id=file_id,
         filename=_safe_filename(file.filename),
         media_type=file.content_type or "application/octet-stream",
         extracted_preview=extracted[:240],
+        workspace_id=resolved_workspace_id,
     )
 
 
@@ -1229,7 +1407,12 @@ def get_conversation(conversation_id: str, request: Request) -> ConversationResp
     user = _current_user(request)
     _conversation_access_check(conversation_id, user)
     messages = storage.get_messages(conversation_id)
-    return ConversationResponse(conversation_id=conversation_id, messages=messages)
+    conversation = storage.get_conversation_record(conversation_id) or {}
+    return ConversationResponse(
+        conversation_id=conversation_id,
+        workspace_id=conversation.get("workspace_id"),
+        messages=messages,
+    )
 
 
 @app.delete("/conversations/{conversation_id}")
@@ -1237,8 +1420,14 @@ def delete_conversation(conversation_id: str, request: Request) -> dict:
     user = _current_user(request)
     if not storage.conversation_exists(conversation_id):
         raise HTTPException(status_code=404, detail="Conversation not found.")
-    owner = storage.conversation_owner(conversation_id)
-    if owner is not None and (user is None or int(user["id"]) != int(owner)):
+    conversation = storage.get_conversation_record(conversation_id) or {}
+    owner = conversation.get("user_id")
+    workspace_id = conversation.get("workspace_id")
+    if workspace_id:
+        _workspace_access_check(workspace_id, user)
+        if owner is not None and (user is None or int(user["id"]) != int(owner)):
+            raise HTTPException(status_code=403, detail="Only the author can delete this workspace chat.")
+    elif owner is not None and (user is None or int(user["id"]) != int(owner)):
         raise HTTPException(status_code=403, detail="Forbidden.")
     ok = storage.delete_conversation(conversation_id, user_id=int(user["id"]) if user else None)
     if not ok:
@@ -1247,11 +1436,16 @@ def delete_conversation(conversation_id: str, request: Request) -> dict:
 
 
 @app.get("/conversations", response_model=ConversationListResponse)
-def list_conversations(request: Request, limit: int = 30) -> ConversationListResponse:
+def list_conversations(request: Request, limit: int = 30, workspace_id: str | None = None) -> ConversationListResponse:
     user = _current_user(request)
     if user is None:
         return ConversationListResponse(conversations=[])
-    conversations = storage.list_conversations(limit=limit, user_id=int(user["id"]))
+    resolved_workspace_id = (workspace_id or "").strip() or None
+    if resolved_workspace_id:
+        _workspace_access_check(resolved_workspace_id, user)
+        conversations = storage.list_conversations(limit=limit, workspace_id=resolved_workspace_id)
+    else:
+        conversations = storage.list_conversations(limit=limit, user_id=int(user["id"]))
     return ConversationListResponse(conversations=conversations)
 
 
@@ -1265,22 +1459,6 @@ def get_live_news(limit: int = 20) -> LiveDataResponse:
     return LiveDataResponse(items=live_store.get_latest("news", limit=limit))
 
 
-def _build_knowledge_context(user_id: int) -> str:
-    """Return a context string combining personal and all workspace knowledge files."""
-    parts: list[str] = []
-    personal = storage.get_user_knowledge_content(user_id)
-    if personal:
-        snippets = ["[" + f["filename"] + "] " + f["content"][:2000] for f in personal[:5]]
-        parts.append("User's personal notes: " + " | ".join(snippets))
-    workspaces = storage.list_user_workspaces(user_id)
-    for ws in workspaces:
-        ws_files = storage.get_workspace_knowledge_content(ws["id"])
-        if ws_files:
-            snippets = ["[" + f["filename"] + "] " + f["content"][:2000] for f in ws_files[:5]]
-            parts.append(f"Workspace '{ws['name']}' shared notes: " + " | ".join(snippets))
-    return "\n\n".join(parts)
-
-
 def _generate_title(user_msg: str, assistant_msg: str) -> str:
     try:
         msgs = [
@@ -1292,6 +1470,26 @@ def _generate_title(user_msg: str, assistant_msg: str) -> str:
         return llm.chat(messages=msgs, max_tokens=20).strip().strip('"').strip("'")[:80]
     except Exception:
         return ""
+
+
+def _resolve_chat_scope(user: dict | None, conversation_id: str | None, workspace_id: str | None) -> tuple[str, dict | None]:
+    resolved_workspace: dict | None = None
+    if conversation_id is None:
+        resolved_workspace_id = (workspace_id or "").strip() or None
+        if resolved_workspace_id:
+            resolved_workspace = _workspace_access_check(resolved_workspace_id, user)
+        created_id = storage.create_conversation(
+            user_id=int(user["id"]) if user else None,
+            workspace_id=resolved_workspace_id,
+        )
+        return created_id, resolved_workspace
+
+    _conversation_access_check(conversation_id, user)
+    conversation = storage.get_conversation_record(conversation_id) or {}
+    resolved_workspace_id = conversation.get("workspace_id")
+    if resolved_workspace_id:
+        resolved_workspace = _workspace_access_check(resolved_workspace_id, user)
+    return conversation_id, resolved_workspace
 
 
 @app.get("/models")
@@ -1316,11 +1514,7 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
     if not sanitized_message:
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
 
-    conversation_id = chat_request.conversation_id
-    if conversation_id is None:
-        conversation_id = storage.create_conversation(user_id=int(user["id"]) if user else None)
-    else:
-        _conversation_access_check(conversation_id, user)
+    conversation_id, workspace = _resolve_chat_scope(user, chat_request.conversation_id, chat_request.workspace_id)
 
     if user:
         plan = _effective_plan(user)
@@ -1347,9 +1541,14 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
     uploaded_files = storage.get_uploaded_files(conversation_id, limit=12)
     uploaded_file_context = _build_uploaded_file_context(uploaded_files)
     if user:
-        _kctx = _build_knowledge_context(int(user["id"]))
+        _kctx = _build_personal_knowledge_context(int(user["id"]))
         if _kctx:
             uploaded_file_context = (uploaded_file_context or "") + "\n\n" + _kctx
+    workspace_context, _workspace_meta = _build_workspace_context_block(
+        workspace=workspace,
+        question=sanitized_message,
+        exclude_conversation_id=conversation_id,
+    )
     raw_message = sanitized_message
     image_prompt = _extract_image_prompt(raw_message)
 
@@ -1387,10 +1586,21 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
         answer = f"Generated image for: {prompt}"
         if user:
             storage.record_usage_event(int(user["id"]), event_type="image_generation")
-        storage.add_message(conversation_id, "user", sanitized_message)
-        storage.add_message(conversation_id, "assistant", answer)
+        user_message_id = storage.add_message(conversation_id, "user", sanitized_message)
+        assistant_message_id = storage.add_message(conversation_id, "assistant", answer)
+        if workspace and user:
+            _ingest_workspace_turn_memory(
+                workspace=workspace,
+                user_id=int(user["id"]),
+                conversation_id=conversation_id,
+                user_message_id=user_message_id,
+                assistant_message_id=assistant_message_id,
+                question=sanitized_message,
+                answer=answer,
+            )
         return ChatResponse(
             conversation_id=conversation_id,
+            workspace_id=workspace["id"] if workspace else None,
             answer=answer,
             retrieved_sources=[],
             web_results=[],
@@ -1407,6 +1617,7 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
             user_location_label=chat_request.user_location_label,
             user_profile=merged_profile,
             uploaded_file_context=uploaded_file_context,
+            workspace_context=workspace_context,
             model=active_model,
         )
     except AuthenticationError as exc:
@@ -1421,11 +1632,21 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
         logger.exception("chat_unexpected_failure error=%s", str(exc))
         raise HTTPException(status_code=503, detail="Temporary server issue. Please try again.") from exc
 
-    storage.add_message(conversation_id, "user", sanitized_message)
-    storage.add_message(conversation_id, "assistant", answer)
+    user_message_id = storage.add_message(conversation_id, "user", sanitized_message)
+    assistant_message_id = storage.add_message(conversation_id, "assistant", answer)
     storage.upsert_user_profile(conversation_id, updated_profile)
     if user:
         storage.upsert_user_memory(int(user["id"]), updated_profile)
+    if workspace and user:
+        _ingest_workspace_turn_memory(
+            workspace=workspace,
+            user_id=int(user["id"]),
+            conversation_id=conversation_id,
+            user_message_id=user_message_id,
+            assistant_message_id=assistant_message_id,
+            question=sanitized_message,
+            answer=answer,
+        )
     _msg_count = len(storage.get_messages(conversation_id, limit=3))
     if _msg_count == 2:
         _title = _generate_title(sanitized_message, answer)
@@ -1438,6 +1659,7 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
     ]
     return ChatResponse(
         conversation_id=conversation_id,
+        workspace_id=workspace["id"] if workspace else None,
         answer=answer,
         retrieved_sources=source_rows,
         web_results=web_results,
@@ -1463,11 +1685,7 @@ def chat_stream(chat_request: ChatRequest, request: Request):
     sanitized_message = _sanitize_chat_message(chat_request.message)
     if not sanitized_message:
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
-    conversation_id = chat_request.conversation_id
-    if conversation_id is None:
-        conversation_id = storage.create_conversation(user_id=int(user["id"]) if user else None)
-    else:
-        _conversation_access_check(conversation_id, user)
+    conversation_id, workspace = _resolve_chat_scope(user, chat_request.conversation_id, chat_request.workspace_id)
     if user:
         plan = _effective_plan(user)
         limits = _plan_limits(plan)
@@ -1492,9 +1710,16 @@ def chat_stream(chat_request: ChatRequest, request: Request):
     uploaded_files = storage.get_uploaded_files(conversation_id, limit=12)
     uploaded_file_context = _build_uploaded_file_context(uploaded_files)
     if user:
-        _kctx = _build_knowledge_context(int(user["id"]))
+        _kctx = _build_personal_knowledge_context(int(user["id"]))
         if _kctx:
             uploaded_file_context = (uploaded_file_context or "") + "\n\n" + _kctx
+    workspace_context, _workspace_meta = _build_workspace_context_block(
+        workspace=workspace,
+        question=sanitized_message,
+        exclude_conversation_id=conversation_id,
+    )
+    chat_request.conversation_id = conversation_id
+    chat_request.workspace_id = workspace["id"] if workspace else chat_request.workspace_id
     image_prompt = _extract_image_prompt(sanitized_message)
     if image_prompt is not None:
         result = chat(chat_request, request)
@@ -1526,6 +1751,7 @@ def chat_stream(chat_request: ChatRequest, request: Request):
                 user_location_label=chat_request.user_location_label,
                 user_profile=merged_profile,
                 uploaded_file_context=uploaded_file_context,
+                workspace_context=workspace_context,
                 model=active_model,
             ):
                 if event_type == "token":
@@ -1542,11 +1768,21 @@ def chat_stream(chat_request: ChatRequest, request: Request):
             logger.exception("chat_stream_failure error=%s", str(exc))
             yield f"event: error\ndata: {json.dumps({'detail': 'Temporary server issue. Please try again.'})}\n\n"
             return
-        storage.add_message(conversation_id, "user", sanitized_message)
-        storage.add_message(conversation_id, "assistant", final_answer)
+        user_message_id = storage.add_message(conversation_id, "user", sanitized_message)
+        assistant_message_id = storage.add_message(conversation_id, "assistant", final_answer)
         storage.upsert_user_profile(conversation_id, final_profile)
         if user:
             storage.upsert_user_memory(int(user["id"]), final_profile)
+        if workspace and user:
+            _ingest_workspace_turn_memory(
+                workspace=workspace,
+                user_id=int(user["id"]),
+                conversation_id=conversation_id,
+                user_message_id=user_message_id,
+                assistant_message_id=assistant_message_id,
+                question=sanitized_message,
+                answer=final_answer,
+            )
         _msg_count = len(storage.get_messages(conversation_id, limit=3))
         if _msg_count == 2:
             _title = _generate_title(sanitized_message, final_answer)
@@ -1558,6 +1794,7 @@ def chat_stream(chat_request: ChatRequest, request: Request):
         ]
         payload = {
             "conversation_id": conversation_id,
+            "workspace_id": workspace["id"] if workspace else None,
             "answer": final_answer,
             "retrieved_sources": source_rows,
             "web_results": final_web_results,
@@ -1585,12 +1822,9 @@ async def upload_knowledge(
         raise HTTPException(status_code=400, detail="File is empty.")
     # Validate workspace membership if a workspace is specified.
     resolved_workspace_id: str | None = None
+    workspace: dict | None = None
     if workspace_id:
-        ws = storage.get_workspace(workspace_id)
-        if not ws:
-            raise HTTPException(status_code=404, detail="Workspace not found.")
-        if not storage.get_workspace_member(workspace_id, int(user["id"])):
-            raise HTTPException(status_code=403, detail="You are not a member of that workspace.")
+        workspace = _workspace_access_check(workspace_id, user)
         resolved_workspace_id = workspace_id
     extracted = _extract_uploaded_content(file, payload)
     file_id = storage.add_user_knowledge_file(
@@ -1599,6 +1833,14 @@ async def upload_knowledge(
         extracted,
         workspace_id=resolved_workspace_id,
     )
+    if workspace:
+        _ingest_workspace_file_memory(
+            workspace=workspace,
+            user_id=int(user["id"]),
+            conversation_id=None,
+            filename=_safe_filename(file.filename),
+            extracted_text=extracted,
+        )
     return {"id": file_id, "filename": _safe_filename(file.filename), "workspace_id": resolved_workspace_id}
 
 
@@ -1607,7 +1849,7 @@ def list_knowledge(request: Request) -> dict:
     user = _current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Login required.")
-    files = storage.list_user_knowledge_files(int(user["id"]))
+    files = [row for row in storage.list_user_knowledge_files(int(user["id"])) if not row.get("workspace_id")]
     return {"files": files}
 
 
@@ -1655,18 +1897,31 @@ def list_workspaces(request: Request) -> dict:
     return {"workspaces": workspaces}
 
 
+@app.get("/workspaces/{workspace_id}")
+def get_workspace_detail(workspace_id: str, request: Request) -> dict:
+    user = _current_user(request)
+    workspace = _workspace_access_check(workspace_id, user)
+    summary = storage.get_workspace_summary(workspace_id)
+    recent_memory = storage.list_workspace_memory_items(workspace_id, limit=8)
+    recent_chats = storage.list_conversations(limit=20, workspace_id=workspace_id)
+    files = storage.list_workspace_knowledge_files(workspace_id)
+    uploaded = storage.list_workspace_uploaded_files(workspace_id, limit=20)
+    return {
+        "workspace": workspace,
+        "summary": summary,
+        "memory_items": recent_memory,
+        "conversations": recent_chats,
+        "files": files,
+        "uploaded_files": uploaded,
+    }
+
+
 @app.get("/workspaces/{workspace_id}/knowledge")
 def list_workspace_knowledge(workspace_id: str, request: Request) -> dict:
-    user = _current_user(request)
-    if not user:
-        raise HTTPException(status_code=401, detail="Login required.")
-    workspace = storage.get_workspace(workspace_id)
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found.")
-    if not storage.get_workspace_member(workspace_id, int(user["id"])):
-        raise HTTPException(status_code=403, detail="You are not a member of this workspace.")
+    _workspace_access_check(workspace_id, _current_user(request))
     files = storage.list_workspace_knowledge_files(workspace_id)
-    return {"files": files}
+    uploaded_files = storage.list_workspace_uploaded_files(workspace_id, limit=50)
+    return {"files": files, "uploaded_files": uploaded_files}
 
 
 @app.post("/workspaces/{workspace_id}/invite")

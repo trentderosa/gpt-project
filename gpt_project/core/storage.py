@@ -3,11 +3,13 @@ import uuid
 import os
 import json
 import re
+import math
 import hashlib
 import hmac
 import secrets
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from collections import Counter
 
 from .config import BASE_DIR
 
@@ -23,6 +25,42 @@ def _default_db_path() -> Path:
 
 
 DB_PATH = _default_db_path()
+
+
+def _tokenize_rank_text(text: str) -> list[str]:
+    return re.findall(r"[a-zA-Z0-9']+", (text or "").lower())
+
+
+def _rank_text_rows(query: str, rows: list[dict], text_getter, top_k: int = 5) -> list[dict]:
+    query_tokens = set(_tokenize_rank_text(query))
+    if not query_tokens or not rows:
+        return []
+    tokenized_rows = [Counter(_tokenize_rank_text(text_getter(row))) for row in rows]
+    doc_freqs: Counter[str] = Counter()
+    for token_counter in tokenized_rows:
+        for token in token_counter:
+            doc_freqs[token] += 1
+    total_docs = len(rows)
+    avgdl = sum(sum(counter.values()) for counter in tokenized_rows) / max(total_docs, 1)
+    ranked: list[dict] = []
+    for row, token_counter in zip(rows, tokenized_rows):
+        dl = sum(token_counter.values())
+        score = 0.0
+        for token in query_tokens:
+            freq = token_counter.get(token, 0)
+            if not freq:
+                continue
+            df = doc_freqs.get(token, 0)
+            idf = math.log((total_docs - df + 0.5) / (df + 0.5) + 1.0)
+            numerator = freq * (1.5 + 1)
+            denominator = freq + 1.5 * (1 - 0.75 + 0.75 * dl / max(avgdl, 1))
+            score += idf * numerator / denominator
+        if score > 0:
+            enriched = dict(row)
+            enriched["score"] = round(score, 4)
+            ranked.append(enriched)
+    ranked.sort(key=lambda row: (row.get("score", 0.0), row.get("importance", 0.0), row.get("id", 0)), reverse=True)
+    return ranked[:top_k]
 
 
 class ChatStorage:
@@ -174,6 +212,39 @@ class ChatStorage:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS workspace_memory_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    workspace_id TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    source_conversation_id TEXT,
+                    source_message_id INTEGER,
+                    memory_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    keywords_json TEXT NOT NULL DEFAULT '[]',
+                    importance REAL NOT NULL DEFAULT 0.5,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(workspace_id) REFERENCES workspaces(id),
+                    FOREIGN KEY(user_id) REFERENCES users(id),
+                    FOREIGN KEY(source_conversation_id) REFERENCES conversations(id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS workspace_memory_summaries (
+                    workspace_id TEXT PRIMARY KEY,
+                    summary_text TEXT NOT NULL,
+                    last_conversation_id TEXT,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(workspace_id) REFERENCES workspaces(id),
+                    FOREIGN KEY(last_conversation_id) REFERENCES conversations(id)
+                )
+                """
+            )
             # Additive migration: add workspace_id to user_knowledge_files (NULL = personal file)
             knowledge_columns = {
                 row["name"]
@@ -191,6 +262,8 @@ class ChatStorage:
                 conn.execute("ALTER TABLE conversations ADD COLUMN user_id INTEGER")
             if "title" not in columns:
                 conn.execute("ALTER TABLE conversations ADD COLUMN title TEXT")
+            if "workspace_id" not in columns:
+                conn.execute("ALTER TABLE conversations ADD COLUMN workspace_id TEXT REFERENCES workspaces(id)")
             user_columns = {
                 row["name"]
                 for row in conn.execute("PRAGMA table_info(users)").fetchall()
@@ -200,14 +273,26 @@ class ChatStorage:
             if "stripe_subscription_id" not in user_columns:
                 conn.execute("ALTER TABLE users ADD COLUMN stripe_subscription_id TEXT")
 
-    def create_conversation(self, user_id: int | None = None) -> str:
+    def create_conversation(self, user_id: int | None = None, workspace_id: str | None = None) -> str:
         conversation_id = str(uuid.uuid4())
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO conversations (id, user_id) VALUES (?, ?)",
-                (conversation_id, user_id),
+                "INSERT INTO conversations (id, user_id, workspace_id) VALUES (?, ?, ?)",
+                (conversation_id, user_id, workspace_id),
             )
         return conversation_id
+
+    def get_conversation_record(self, conversation_id: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, user_id, workspace_id, title, created_at
+                FROM conversations
+                WHERE id = ?
+                """,
+                (conversation_id,),
+            ).fetchone()
+        return dict(row) if row else None
 
     def conversation_exists(self, conversation_id: str) -> bool:
         with self._connect() as conn:
@@ -218,21 +303,24 @@ class ChatStorage:
         return row is not None
 
     def conversation_owner(self, conversation_id: str) -> int | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT user_id FROM conversations WHERE id = ?",
-                (conversation_id,),
-            ).fetchone()
+        row = self.get_conversation_record(conversation_id)
         if not row:
             return None
         return row["user_id"]
 
-    def add_message(self, conversation_id: str, role: str, content: str) -> None:
+    def conversation_workspace(self, conversation_id: str) -> str | None:
+        row = self.get_conversation_record(conversation_id)
+        if not row:
+            return None
+        return row.get("workspace_id")
+
+    def add_message(self, conversation_id: str, role: str, content: str) -> int:
         with self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 "INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)",
                 (conversation_id, role, content),
             )
+            return int(cursor.lastrowid)
 
     def get_messages(self, conversation_id: str, limit: int | None = None) -> list[dict]:
         query = """
@@ -250,11 +338,18 @@ class ChatStorage:
             rows = conn.execute(query, tuple(params)).fetchall()
         return [{"role": row["role"], "content": row["content"]} for row in rows]
 
-    def list_conversations(self, limit: int = 30, user_id: int | None = None) -> list[dict]:
+    def list_conversations(
+        self,
+        limit: int = 30,
+        user_id: int | None = None,
+        workspace_id: str | None = None,
+    ) -> list[dict]:
         query = """
             SELECT
                 c.id AS conversation_id,
                 c.title AS title,
+                c.workspace_id AS workspace_id,
+                c.user_id AS user_id,
                 c.created_at AS created_at,
                 (
                     SELECT MAX(m2.created_at)
@@ -266,11 +361,15 @@ class ChatStorage:
             ORDER BY COALESCE(last_message_at, c.created_at) DESC
             LIMIT ?
         """
-        where_clause = ""
+        clauses: list[str] = []
         params: list[object] = []
         if user_id is not None:
-            where_clause = "WHERE c.user_id = ?"
+            clauses.append("c.user_id = ?")
             params.append(user_id)
+        if workspace_id is not None:
+            clauses.append("c.workspace_id = ?")
+            params.append(workspace_id)
+        where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         query = query.format(where_clause=where_clause)
         with self._connect() as conn:
             params.append(limit)
@@ -282,6 +381,8 @@ class ChatStorage:
                     {
                         "conversation_id": row["conversation_id"],
                         "title": row["title"],
+                        "workspace_id": row["workspace_id"],
+                        "user_id": row["user_id"],
                         "created_at": row["created_at"],
                         "last_message_at": row["last_message_at"],
                         "preview": preview,
@@ -846,10 +947,18 @@ class ChatStorage:
     def list_user_knowledge_files(self, user_id: int) -> list[dict]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, filename, created_at FROM user_knowledge_files WHERE user_id = ? ORDER BY id DESC LIMIT 20",
+                "SELECT id, filename, created_at, workspace_id FROM user_knowledge_files WHERE user_id = ? ORDER BY id DESC LIMIT 20",
                 (user_id,),
             ).fetchall()
-        return [{"id": row["id"], "filename": row["filename"], "created_at": row["created_at"]} for row in rows]
+        return [
+            {
+                "id": row["id"],
+                "filename": row["filename"],
+                "created_at": row["created_at"],
+                "workspace_id": row["workspace_id"],
+            }
+            for row in rows
+        ]
 
     def get_user_knowledge_content(self, user_id: int) -> list[dict]:
         with self._connect() as conn:
@@ -944,6 +1053,112 @@ class ChatStorage:
             )
         return True
 
+    def add_workspace_memory_item(
+        self,
+        workspace_id: str,
+        user_id: int,
+        source_conversation_id: str | None,
+        source_message_id: int | None,
+        memory_type: str,
+        title: str,
+        content: str,
+        keywords: list[str] | None = None,
+        importance: float = 0.5,
+    ) -> int:
+        payload = json.dumps(list(keywords or []), ensure_ascii=True)
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO workspace_memory_items (
+                    workspace_id, user_id, source_conversation_id, source_message_id,
+                    memory_type, title, content, keywords_json, importance
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    workspace_id,
+                    user_id,
+                    source_conversation_id,
+                    source_message_id,
+                    (memory_type or "summary").strip().lower(),
+                    (title or "Workspace memory")[:80],
+                    (content or "").strip()[:1000],
+                    payload,
+                    float(max(min(importance, 1.0), 0.0)),
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def list_workspace_memory_items(self, workspace_id: str, limit: int = 20) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, workspace_id, user_id, source_conversation_id, source_message_id,
+                       memory_type, title, content, keywords_json, importance, created_at, updated_at
+                FROM workspace_memory_items
+                WHERE workspace_id = ?
+                ORDER BY importance DESC, updated_at DESC, id DESC
+                LIMIT ?
+                """,
+                (workspace_id, limit),
+            ).fetchall()
+        items: list[dict] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["keywords"] = json.loads(item.pop("keywords_json") or "[]")
+            except Exception:
+                item["keywords"] = []
+            items.append(item)
+        return items
+
+    def search_workspace_memory(self, workspace_id: str, query: str, limit: int = 6) -> list[dict]:
+        rows = self.list_workspace_memory_items(workspace_id, limit=200)
+        return _rank_text_rows(
+            query,
+            rows,
+            lambda row: " ".join(
+                [
+                    str(row.get("memory_type", "")),
+                    str(row.get("title", "")),
+                    str(row.get("content", "")),
+                    " ".join(row.get("keywords") or []),
+                ]
+            ),
+            top_k=limit,
+        )
+
+    def get_workspace_summary(self, workspace_id: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT workspace_id, summary_text, last_conversation_id, updated_at
+                FROM workspace_memory_summaries
+                WHERE workspace_id = ?
+                """,
+                (workspace_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_workspace_summary(
+        self,
+        workspace_id: str,
+        summary_text: str,
+        last_conversation_id: str | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO workspace_memory_summaries (workspace_id, summary_text, last_conversation_id)
+                VALUES (?, ?, ?)
+                ON CONFLICT(workspace_id) DO UPDATE SET
+                    summary_text = excluded.summary_text,
+                    last_conversation_id = excluded.last_conversation_id,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (workspace_id, (summary_text or "").strip()[:3000], last_conversation_id),
+            )
+
     def list_workspace_knowledge_files(self, workspace_id: str) -> list[dict]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -971,3 +1186,36 @@ class ChatStorage:
                 (workspace_id,),
             ).fetchall()
         return [{"id": row["id"], "filename": row["filename"], "content": row["content"]} for row in rows]
+
+    def search_workspace_knowledge_content(self, workspace_id: str, query: str, limit: int = 4) -> list[dict]:
+        rows = self.get_workspace_knowledge_content(workspace_id)
+        return _rank_text_rows(
+            query,
+            rows,
+            lambda row: f"{row.get('filename', '')} {row.get('content', '')}",
+            top_k=limit,
+        )
+
+    def list_workspace_uploaded_files(self, workspace_id: str, limit: int = 30) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT uf.id, uf.filename, uf.media_type, uf.extracted_text, uf.created_at, uf.conversation_id
+                FROM uploaded_files uf
+                JOIN conversations c ON c.id = uf.conversation_id
+                WHERE c.workspace_id = ?
+                ORDER BY uf.id DESC
+                LIMIT ?
+                """,
+                (workspace_id, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def search_workspace_uploaded_files(self, workspace_id: str, query: str, limit: int = 4) -> list[dict]:
+        rows = self.list_workspace_uploaded_files(workspace_id, limit=200)
+        return _rank_text_rows(
+            query,
+            rows,
+            lambda row: f"{row.get('filename', '')} {row.get('extracted_text', '')}",
+            top_k=limit,
+        )

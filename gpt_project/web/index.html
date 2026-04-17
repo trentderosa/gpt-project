@@ -763,6 +763,7 @@
         </div>
         <div id="activeWorkspacePanel" class="workspace-panel" style="display:none;">
           <div id="activeWorkspaceName" class="workspace-panel-name"></div>
+          <div id="activeWorkspaceSummary" style="font-size:11px;color:var(--muted);line-height:1.45;margin-bottom:6px;"></div>
           <div class="workspace-row">
             <input id="inviteEmail" class="workspace-input" type="email" placeholder="Invite by email">
             <button id="inviteBtn" class="auth-secondary" type="button">Invite</button>
@@ -845,6 +846,7 @@
     const SIDEBAR_KEY = "cortex_sidebar_hidden";
     const DARK_KEY = "cortex_dark_mode";
     const MODEL_KEY = "cortex_model";
+    const WORKSPACE_KEY = "cortex_active_workspace_id";
 
     let conversationId = localStorage.getItem(KEY) || null;
     let currentUser = null;
@@ -866,6 +868,7 @@
     const createWorkspaceBtnEl = document.getElementById("createWorkspaceBtn");
     const activeWorkspacePanelEl = document.getElementById("activeWorkspacePanel");
     const activeWorkspaceNameEl = document.getElementById("activeWorkspaceName");
+    const activeWorkspaceSummaryEl = document.getElementById("activeWorkspaceSummary");
     const inviteEmailEl = document.getElementById("inviteEmail");
     const inviteBtnEl = document.getElementById("inviteBtn");
     const workspaceFilesListEl = document.getElementById("workspaceFilesList");
@@ -874,6 +877,7 @@
     let activeWorkspace = null;
     let lastUserMessage = null;
     let lastBotBubble = null;
+    let authRuntime = null;
 
     function applyDarkMode() {
       document.documentElement.classList.toggle("dark", darkMode);
@@ -982,8 +986,9 @@
       authPasswordEl.style.display = loggedIn ? "none" : "";
       continueAuthBtnEl.style.display = loggedIn ? "none" : "";
       registerAuthBtnEl.style.display = loggedIn ? "none" : "";
-      resetNewPasswordEl.style.display = loggedIn ? "none" : "";
-      resetPasswordBtnEl.style.display = loggedIn ? "none" : "";
+      const directResetEnabled = !!authRuntime?.password_reset_dev_mode;
+      resetNewPasswordEl.style.display = !loggedIn && directResetEnabled ? "" : "none";
+      resetPasswordBtnEl.style.display = !loggedIn && directResetEnabled ? "" : "none";
       logoutBtnEl.style.display = loggedIn ? "" : "none";
       planActionsEl.style.display = loggedIn && !isCreator ? "" : "none";
       knowledgeSectionEl.style.display = loggedIn ? "" : "none";
@@ -993,6 +998,7 @@
         if (notesListEl) notesListEl.innerHTML = "";
         activeWorkspace = null;
         activeWorkspacePanelEl.style.display = "none";
+        activeWorkspaceSummaryEl.textContent = "";
       }
     }
 
@@ -1009,6 +1015,19 @@
         authStatusEl.textContent = `${data.user.email} | ${privilegeLabel} | prompts: ${inputCap} | images: ${imageCap} | used: ${data.usage_last_hour}`;
       } catch (_) {
         setAuthState(null);
+      }
+    }
+
+    async function refreshAuthRuntime() {
+      try {
+        const res = await apiFetch("/health");
+        if (!res.ok) return;
+        authRuntime = await res.json();
+        const directResetEnabled = !!authRuntime.password_reset_dev_mode;
+        resetNewPasswordEl.style.display = directResetEnabled && !currentUser ? "" : "none";
+        resetPasswordBtnEl.style.display = directResetEnabled && !currentUser ? "" : "none";
+      } catch (_) {
+        authRuntime = null;
       }
     }
 
@@ -1304,6 +1323,7 @@
             const formData = new FormData();
             formData.append("file", file);
             if (conversationId) formData.append("conversation_id", conversationId);
+            if (activeWorkspace?.id) formData.append("workspace_id", activeWorkspace.id);
             const uploadRes = await apiFetch("/upload", { method: "POST", body: formData });
             const uploadData = await uploadRes.json();
             if (!uploadRes.ok) {
@@ -1330,6 +1350,7 @@
           body: JSON.stringify({
             message,
             conversation_id: conversationId,
+            workspace_id: activeWorkspace?.id || null,
             use_web_search: webSearchEl.checked,
             user_timezone: browserTimeZone,
             user_utc_offset_minutes: browserUtcOffsetMinutes,
@@ -1476,7 +1497,8 @@
 
     async function refreshConversationList() {
       try {
-        const res = await apiFetch("/conversations?limit=50");
+        const query = activeWorkspace?.id ? `/conversations?limit=50&workspace_id=${encodeURIComponent(activeWorkspace.id)}` : "/conversations?limit=50";
+        const res = await apiFetch(query);
         if (!res.ok) return;
         const data = await res.json();
         historyListEl.innerHTML = "";
@@ -1486,7 +1508,8 @@
           const btn = document.createElement("button");
           btn.className = "history-item-btn";
           if (convo.conversation_id === conversationId) btn.classList.add("active");
-          btn.innerHTML = `<span class="history-preview">${escapeHtml(convo.title || convo.preview || "New conversation")}</span><span class="history-time">${fmtDate(convo.last_message_at || convo.created_at)}</span>`;
+          const workspaceTag = convo.workspace_id ? " • workspace" : "";
+          btn.innerHTML = `<span class="history-preview">${escapeHtml(convo.title || convo.preview || "New conversation")}</span><span class="history-time">${fmtDate(convo.last_message_at || convo.created_at)}${workspaceTag}</span>`;
           btn.addEventListener("click", async () => {
             conversationId = convo.conversation_id;
             localStorage.setItem(KEY, conversationId);
@@ -1669,6 +1692,10 @@
     }
 
     async function submitPasswordReset() {
+      if (!authRuntime?.password_reset_dev_mode) {
+        addBubble("Error: Direct password reset is disabled in this environment. Use the normal login flow.", "bot", "error");
+        return;
+      }
       const email = authEmailEl.value.trim();
       const newPassword = resetNewPasswordEl.value;
       if (!email || !newPassword) {
@@ -1814,23 +1841,69 @@
         const res = await apiFetch("/workspaces");
         if (!res.ok) return;
         const data = await res.json();
+        const savedWorkspaceId = localStorage.getItem(WORKSPACE_KEY);
+        const shouldRestore = !activeWorkspace && savedWorkspaceId;
         workspaceListEl.innerHTML = "";
         for (const ws of data.workspaces || []) {
           const li = document.createElement("li");
           li.className = "workspace-item" + (activeWorkspace && activeWorkspace.id === ws.id ? " active" : "");
           li.innerHTML = `<span class="workspace-item-name" title="${escapeHtml(ws.name)}">${escapeHtml(ws.name)}</span><span style="font-size:10px;color:var(--muted);">${escapeHtml(ws.role)}</span>`;
-          li.addEventListener("click", () => setActiveWorkspace(ws));
+          li.addEventListener("click", () => {
+            if (activeWorkspace && activeWorkspace.id === ws.id) {
+              clearActiveWorkspace();
+              return;
+            }
+            setActiveWorkspace(ws);
+          });
           workspaceListEl.appendChild(li);
+          if (shouldRestore && ws.id === savedWorkspaceId) {
+            activeWorkspace = ws;
+          }
+        }
+        if (shouldRestore && activeWorkspace) {
+          activeWorkspaceNameEl.textContent = activeWorkspace.name;
+          activeWorkspacePanelEl.style.display = "";
+          activeWorkspaceSummaryEl.textContent = "Workspace memory is active across chats in this project.";
+          refreshWorkspaceFiles();
         }
       } catch (_) {}
     }
 
+    function clearActiveWorkspace() {
+      activeWorkspace = null;
+      localStorage.removeItem(WORKSPACE_KEY);
+      activeWorkspaceNameEl.textContent = "";
+      activeWorkspaceSummaryEl.textContent = "";
+      activeWorkspacePanelEl.style.display = "none";
+      conversationId = null;
+      localStorage.removeItem(KEY);
+      chatEl.innerHTML = "";
+      addMeta("Workspace context cleared. You're back in general chat.");
+      refreshWorkspaces();
+      refreshConversationList();
+    }
+
     async function setActiveWorkspace(ws) {
       activeWorkspace = ws;
+      localStorage.setItem(WORKSPACE_KEY, ws.id);
       activeWorkspaceNameEl.textContent = ws.name;
       activeWorkspacePanelEl.style.display = "";
+      activeWorkspaceSummaryEl.textContent = "Workspace memory is active across chats in this project.";
+      conversationId = null;
+      localStorage.removeItem(KEY);
+      chatEl.innerHTML = "";
+      addMeta(`Workspace active: ${ws.name}. New chats will reuse this workspace's memory and files.`);
+      try {
+        const res = await apiFetch("/workspaces/" + ws.id);
+        if (res.ok) {
+          const data = await res.json();
+          const summary = data.summary?.summary_text || "Workspace memory is active across chats in this project.";
+          activeWorkspaceSummaryEl.textContent = summary;
+        }
+      } catch (_) {}
       await refreshWorkspaceFiles();
       await refreshWorkspaces();
+      await refreshConversationList();
     }
 
     async function refreshWorkspaceFiles() {
@@ -1840,11 +1913,12 @@
         if (!res.ok) return;
         const data = await res.json();
         workspaceFilesListEl.innerHTML = "";
-        if (!(data.files || []).length) {
+        const combined = [...(data.files || []), ...(data.uploaded_files || [])];
+        if (!combined.length) {
           workspaceFilesListEl.innerHTML = "<li style='font-size:11px;color:var(--muted);padding:4px 0;'>No files yet.</li>";
           return;
         }
-        for (const f of data.files) {
+        for (const f of combined) {
           const li = document.createElement("li");
           li.className = "knowledge-item";
           li.innerHTML = `<span class="knowledge-item-name" title="${escapeHtml(f.filename)}">${escapeHtml(f.filename)}</span>`;
@@ -1859,8 +1933,10 @@
       try {
         const res = await apiFetch("/workspaces", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
         if (!res.ok) { const d = await res.json(); addBubble("Error: " + (d.detail || "Could not create workspace"), "bot", "error"); return; }
+        const workspace = await res.json();
         newWorkspaceNameEl.value = "";
         await refreshWorkspaces();
+        await setActiveWorkspace(workspace);
       } catch (err) { addBubble("Error: " + err.message, "bot", "error"); }
     });
 
@@ -1895,7 +1971,7 @@
     initLocationHint();
     applySidebarState();
     applyDarkMode();
-    Promise.all([refreshMe(), loadConversation(), refreshConversationList(), refreshNotes(), refreshWorkspaces()]).finally(() => {
+    Promise.all([refreshAuthRuntime(), refreshMe(), loadConversation(), refreshConversationList(), refreshNotes(), refreshWorkspaces()]).finally(() => {
       renderAttachmentTray();
       if (!chatEl.children.length) {
         addMeta("Cortex Engine by Trent DeRosa — ask anything, attach files, or pick a starter prompt below.");
