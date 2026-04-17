@@ -728,7 +728,6 @@
       <div class="auth-box">
         <input id="authEmail" type="email" placeholder="Email" autocomplete="username">
         <input id="authPassword" type="password" placeholder="Password" autocomplete="current-password">
-        <input id="creatorSecret" type="password" placeholder="Creator secret" autocomplete="off" style="font-size:0.8em;opacity:0.7;display:none;">
         <div class="auth-actions">
           <button id="continueAuthBtn" type="button">Login</button>
           <button id="registerAuthBtn" type="button">Register</button>
@@ -847,10 +846,6 @@
     const DARK_KEY = "cortex_dark_mode";
     const MODEL_KEY = "cortex_model";
 
-    // Show creator-only fields when ?creator param is present
-    if (new URLSearchParams(location.search).has("creator")) {
-      document.getElementById("creatorSecret").style.display = "";
-    }
     let conversationId = localStorage.getItem(KEY) || null;
     let currentUser = null;
     const MAX_RENDERED_ITEMS = 220;
@@ -982,6 +977,7 @@
     function setAuthState(user) {
       currentUser = user || null;
       const loggedIn = !!currentUser;
+      const isCreator = !!currentUser?.is_creator;
       authEmailEl.style.display = loggedIn ? "none" : "";
       authPasswordEl.style.display = loggedIn ? "none" : "";
       continueAuthBtnEl.style.display = loggedIn ? "none" : "";
@@ -989,7 +985,7 @@
       resetNewPasswordEl.style.display = loggedIn ? "none" : "";
       resetPasswordBtnEl.style.display = loggedIn ? "none" : "";
       logoutBtnEl.style.display = loggedIn ? "" : "none";
-      planActionsEl.style.display = loggedIn ? "" : "none";
+      planActionsEl.style.display = loggedIn && !isCreator ? "" : "none";
       knowledgeSectionEl.style.display = loggedIn ? "" : "none";
       workspaceSectionEl.style.display = loggedIn ? "" : "none";
       if (!loggedIn) {
@@ -1009,7 +1005,8 @@
         const limits = data.limits || {};
         const inputCap = limits.inputs_per_hour == null ? "unlimited" : `${limits.inputs_per_hour}/hour`;
         const imageCap = limits.images_per_hour == null ? "unlimited" : `${limits.images_per_hour}/hour`;
-        authStatusEl.textContent = `${data.user.email} • ${data.user.plan} • prompts: ${inputCap} • images: ${imageCap} • used: ${data.usage_last_hour}`;
+        const privilegeLabel = data.user.is_creator ? "creator admin" : data.user.plan;
+        authStatusEl.textContent = `${data.user.email} | ${privilegeLabel} | prompts: ${inputCap} | images: ${imageCap} | used: ${data.usage_last_hour}`;
       } catch (_) {
         setAuthState(null);
       }
@@ -1654,7 +1651,7 @@
         const res = await fetch("/auth/register", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, password, creator_bootstrap_secret: document.getElementById("creatorSecret").value || undefined })
+          body: JSON.stringify({ email, password })
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || "Registration failed");

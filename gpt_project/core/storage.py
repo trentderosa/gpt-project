@@ -464,25 +464,55 @@ class ChatStorage:
             ).fetchone()
         return dict(row)
 
-    def authenticate_user(self, email: str, password: str) -> dict | None:
+    def sync_creator_plan(self, email: str) -> dict | None:
+        normalized = (email or "").strip().lower()
+        if not normalized:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM users WHERE email = ?",
+                (normalized,),
+            ).fetchone()
+            if not row:
+                return None
+            conn.execute(
+                "UPDATE users SET plan = 'creator' WHERE email = ?",
+                (normalized,),
+            )
+            refreshed = conn.execute(
+                "SELECT id, email, plan, stripe_customer_id, stripe_subscription_id, created_at FROM users WHERE email = ?",
+                (normalized,),
+            ).fetchone()
+        return dict(refreshed) if refreshed else None
+
+    def authenticate_user_detailed(self, email: str, password: str) -> tuple[dict | None, str]:
         normalized = email.strip().lower()
+        if not normalized:
+            return None, "missing_email"
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT id, email, password_hash, plan, stripe_customer_id, stripe_subscription_id, created_at FROM users WHERE email = ?",
                 (normalized,),
             ).fetchone()
         if not row:
-            return None
+            return None, "account_not_found"
         if not self._verify_password(password, row["password_hash"]):
-            return None
-        return {
-            "id": row["id"],
-            "email": row["email"],
-            "plan": row["plan"],
-            "stripe_customer_id": row["stripe_customer_id"],
-            "stripe_subscription_id": row["stripe_subscription_id"],
-            "created_at": row["created_at"],
-        }
+            return None, "password_mismatch"
+        return (
+            {
+                "id": row["id"],
+                "email": row["email"],
+                "plan": row["plan"],
+                "stripe_customer_id": row["stripe_customer_id"],
+                "stripe_subscription_id": row["stripe_subscription_id"],
+                "created_at": row["created_at"],
+            },
+            "ok",
+        )
+
+    def authenticate_user(self, email: str, password: str) -> dict | None:
+        user, _reason = self.authenticate_user_detailed(email=email, password=password)
+        return user
 
     def change_password(self, user_id: int, current_password: str, new_password: str) -> bool:
         if len(new_password or "") < 8:

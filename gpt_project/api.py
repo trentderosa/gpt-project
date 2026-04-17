@@ -124,6 +124,8 @@ PASSWORD_RESET_DEV_MODE = (os.getenv("PASSWORD_RESET_DEV_MODE", "false").strip()
 SESSION_TTL_DAYS = int(os.getenv("SESSION_TTL_DAYS", "180"))
 SESSION_SLIDING_RENEWAL = os.getenv("SESSION_SLIDING_RENEWAL", "true").strip().lower() == "true"
 SESSION_ABSOLUTE_MAX_DAYS = int(os.getenv("SESSION_ABSOLUTE_MAX_DAYS", "365"))
+CREATOR_EMAIL = (os.getenv("CREATOR_EMAIL") or "").strip().lower()
+CREATOR_PASSWORD = (os.getenv("CREATOR_PASSWORD") or "").strip()
 CREATOR_BOOTSTRAP_SECRET = (os.getenv("CREATOR_BOOTSTRAP_SECRET") or "").strip()
 SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "cortex_session").strip()
 _cookie_secure_env = os.getenv("COOKIE_SECURE")
@@ -399,6 +401,89 @@ class MemoryForgetRequest(BaseModel):
     keys: list[str] = Field(default_factory=list)
 
 
+def _normalize_email(email: str | None) -> str:
+    return (email or "").strip().lower()
+
+
+def _is_creator_email(email: str | None) -> bool:
+    normalized = _normalize_email(email)
+    return bool(CREATOR_EMAIL and normalized and normalized == CREATOR_EMAIL)
+
+
+def _sync_creator_user_record(user: dict | None, context: str) -> dict | None:
+    if not user:
+        return None
+    if not _is_creator_email(user.get("email")):
+        return user
+    current_plan = str(user.get("plan", "")).strip().lower()
+    if current_plan == "creator":
+        return user
+    synced = storage.sync_creator_plan(str(user.get("email", "")))
+    logger.info(
+        "creator_plan_synced context=%s email=%s previous_plan=%s synced=%s",
+        context,
+        _normalize_email(user.get("email")),
+        current_plan or "missing",
+        bool(synced),
+    )
+    if synced:
+        return synced
+    user["plan"] = "creator"
+    return user
+
+
+def _effective_plan(user: dict | None) -> str:
+    if not user:
+        return "free"
+    email = _normalize_email(user.get("email"))
+    if _is_creator_email(email):
+        return "creator"
+    plan = str(user.get("plan", "free")).strip().lower() or "free"
+    return plan if plan in PLAN_CONFIG else "free"
+
+
+def _auth_user_payload(user: dict | None, context: str = "unknown") -> dict:
+    user = _sync_creator_user_record(user, context=context)
+    plan = _effective_plan(user)
+    is_creator = plan == "creator"
+    return {
+        "id": user["id"],
+        "email": user["email"],
+        "plan": plan,
+        "is_creator": is_creator,
+        "is_admin": is_creator,
+    }
+
+
+def _ensure_creator_account(reason: str) -> dict | None:
+    if not CREATOR_EMAIL:
+        return None
+    if CREATOR_PASSWORD:
+        user = storage.upsert_creator_user(email=CREATOR_EMAIL, password=CREATOR_PASSWORD)
+        logger.info(
+            "creator_account_ensured reason=%s email=%s mode=env_password",
+            reason,
+            CREATOR_EMAIL,
+        )
+        return user
+    existing = storage.get_user_by_email(CREATOR_EMAIL)
+    if not existing:
+        logger.warning(
+            "creator_account_missing reason=%s email=%s creator_password_configured=%s",
+            reason,
+            CREATOR_EMAIL,
+            False,
+        )
+        return None
+    synced = storage.sync_creator_plan(CREATOR_EMAIL) or existing
+    logger.info(
+        "creator_account_ensured reason=%s email=%s mode=existing_account",
+        reason,
+        CREATOR_EMAIL,
+    )
+    return synced
+
+
 def _build_uploaded_file_context(uploaded_files: list[dict]) -> str:
     if not uploaded_files:
         return ""
@@ -424,6 +509,7 @@ def _current_user(request: Request) -> dict | None:
     if not token:
         return None
     user = storage.get_user_by_token(token, max_age_days=SESSION_ABSOLUTE_MAX_DAYS)
+    user = _sync_creator_user_record(user, context="session")
     if user and SESSION_SLIDING_RENEWAL:
         storage.touch_session(token, ttl_days=SESSION_TTL_DAYS)
     return user
@@ -443,17 +529,6 @@ def _set_session_cookie(response: Response, token: str) -> None:
 
 def _clear_session_cookie(response: Response) -> None:
     response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
-
-
-def _effective_plan(user: dict | None) -> str:
-    if not user:
-        return "free"
-    email = str(user.get("email", "")).strip().lower()
-    creator_email = (os.getenv("CREATOR_EMAIL") or "").strip().lower()
-    if creator_email and email == creator_email:
-        return "creator"
-    plan = str(user.get("plan", "free")).strip().lower() or "free"
-    return plan if plan in PLAN_CONFIG else "free"
 
 
 def _plan_limits(plan: str) -> dict:
@@ -635,6 +710,14 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 
 @app.on_event("startup")
+def startup_auth_state() -> None:
+    try:
+        _ensure_creator_account(reason="startup")
+    except Exception:
+        logger.exception("creator_account_ensure_failed reason=startup")
+
+
+@app.on_event("startup")
 def startup_live_updates() -> None:
     global embedded_scheduler
     enabled = os.getenv("LIVE_UPDATE_ENABLED", "true").strip().lower() == "true"
@@ -699,35 +782,55 @@ def terms_page() -> FileResponse:
 def register(body: AuthRequest, request: Request, response: Response) -> AuthResponse:
     if not auth_rate_limiter.allow(_client_key(request)):
         raise HTTPException(status_code=429, detail="Too many auth attempts. Try again soon.")
-    email_key = (body.email or "").strip().lower()
+    email_key = _normalize_email(body.email)
     if email_key and not auth_email_rate_limiter.allow(f"register:{email_key}"):
         raise HTTPException(status_code=429, detail="Too many attempts for this account/email.")
-    creator_email = (os.getenv("CREATOR_EMAIL") or "").strip().lower()
-    incoming_email = (body.email or "").strip().lower()
+    incoming_email = _normalize_email(body.email)
     is_creator_registration = False
-    if creator_email and incoming_email == creator_email:
+    if _is_creator_email(incoming_email):
+        if CREATOR_PASSWORD:
+            raise HTTPException(
+                status_code=409,
+                detail="Creator account is managed by server configuration. Use normal login.",
+            )
         if not CREATOR_BOOTSTRAP_SECRET:
             raise HTTPException(status_code=503, detail="Creator bootstrap is not configured.")
         submitted = (body.creator_bootstrap_secret or "").strip()
         if submitted != CREATOR_BOOTSTRAP_SECRET:
             raise HTTPException(status_code=403, detail="Creator bootstrap secret is required.")
         is_creator_registration = True
+    logger.info(
+        "auth_register_attempt email=%s creator_email=%s bootstrap=%s",
+        incoming_email,
+        _is_creator_email(incoming_email),
+        is_creator_registration,
+    )
     try:
         if is_creator_registration:
             user = storage.upsert_creator_user(email=body.email, password=body.password)
         else:
             user = storage.create_user(email=body.email, password=body.password)
     except ValueError as exc:
+        logger.warning(
+            "auth_register_failed email=%s creator_email=%s reason=%s",
+            incoming_email,
+            _is_creator_email(incoming_email),
+            str(exc),
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     token = storage.create_session(user_id=int(user["id"]), ttl_days=SESSION_TTL_DAYS)
     _set_session_cookie(response, token)
+    payload = _auth_user_payload(user, context="register")
+    logger.info(
+        "auth_register_success email=%s user_id=%s plan=%s is_creator=%s",
+        payload["email"],
+        payload["id"],
+        payload["plan"],
+        payload["is_creator"],
+    )
     return AuthResponse(
         token=token,
-        user={
-            "id": user["id"],
-            "email": user["email"],
-            "plan": _effective_plan(user),
-        },
+        user=payload,
     )
 
 
@@ -735,21 +838,41 @@ def register(body: AuthRequest, request: Request, response: Response) -> AuthRes
 def login(body: AuthRequest, request: Request, response: Response) -> AuthResponse:
     if not auth_rate_limiter.allow(_client_key(request)):
         raise HTTPException(status_code=429, detail="Too many auth attempts. Try again soon.")
-    email_key = (body.email or "").strip().lower()
+    email_key = _normalize_email(body.email)
     if email_key and not auth_email_rate_limiter.allow(f"login:{email_key}"):
         raise HTTPException(status_code=429, detail="Too many attempts for this account/email.")
-    user = storage.authenticate_user(email=body.email, password=body.password)
+    logger.info(
+        "auth_login_attempt email=%s creator_email=%s",
+        email_key,
+        _is_creator_email(email_key),
+    )
+    user, auth_reason = storage.authenticate_user_detailed(email=body.email, password=body.password)
+    if not user and _is_creator_email(email_key) and CREATOR_PASSWORD:
+        ensured = _ensure_creator_account(reason="login")
+        if ensured:
+            user, auth_reason = storage.authenticate_user_detailed(email=body.email, password=body.password)
     if not user:
+        logger.warning(
+            "auth_login_failed email=%s creator_email=%s reason=%s",
+            email_key,
+            _is_creator_email(email_key),
+            auth_reason,
+        )
         raise HTTPException(status_code=401, detail="Invalid email or password.")
     token = storage.create_session(user_id=int(user["id"]), ttl_days=SESSION_TTL_DAYS)
     _set_session_cookie(response, token)
+    payload = _auth_user_payload(user, context="login")
+    logger.info(
+        "auth_login_success email=%s user_id=%s plan=%s is_creator=%s session_created=%s",
+        payload["email"],
+        payload["id"],
+        payload["plan"],
+        payload["is_creator"],
+        True,
+    )
     return AuthResponse(
         token=token,
-        user={
-            "id": user["id"],
-            "email": user["email"],
-            "plan": _effective_plan(user),
-        },
+        user=payload,
     )
 
 
@@ -853,12 +976,16 @@ def me(request: Request) -> MeResponse:
     plan = _effective_plan(user)
     limits = _plan_limits(plan)
     usage = storage.usage_count_last_hour(int(user["id"]))
+    payload = _auth_user_payload(user, context="me")
+    logger.info(
+        "auth_me_loaded email=%s user_id=%s plan=%s is_creator=%s",
+        payload["email"],
+        payload["id"],
+        payload["plan"],
+        payload["is_creator"],
+    )
     return MeResponse(
-        user={
-            "id": user["id"],
-            "email": user["email"],
-            "plan": plan,
-        },
+        user=payload,
         usage_last_hour=usage,
         free_inputs_per_hour=FREE_INPUTS_PER_HOUR,
         limits=limits,
@@ -1022,7 +1149,7 @@ async def billing_webhook(request: Request) -> dict:
 @app.post("/admin/users/plan")
 def admin_set_user_plan(body: PlanUpdateRequest, request: Request) -> dict:
     user = _current_user(request)
-    if not user or _effective_plan(user) != "creator":
+    if not user or not _auth_user_payload(user, context="admin_set_plan")["is_admin"]:
         raise HTTPException(status_code=403, detail="Creator access required.")
     plan = body.plan.strip().lower()
     if plan not in PLAN_CONFIG:
@@ -1036,7 +1163,7 @@ def admin_set_user_plan(body: PlanUpdateRequest, request: Request) -> dict:
 @app.get("/admin/stats")
 def admin_stats(request: Request) -> dict:
     user = _current_user(request)
-    if not user or _effective_plan(user) != "creator":
+    if not user or not _auth_user_payload(user, context="admin_stats")["is_admin"]:
         raise HTTPException(status_code=403, detail="Creator access required.")
     return {"stats": storage.admin_stats()}
 
