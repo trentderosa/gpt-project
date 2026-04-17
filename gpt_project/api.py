@@ -72,6 +72,26 @@ search_tool = build_search_tool(
     brave_api_key=BRAVE_SEARCH_API_KEY,
     tavily_api_key=TAVILY_API_KEY,
 )
+# Startup provider config report — printed once at boot so deployment is easy to audit.
+_available_providers = search_tool.available_providers() if isinstance(search_tool, CompositeWebSearchTool) else [getattr(search_tool, "provider_name", "unknown")]
+_primary_provider = next((p for p in _available_providers if p not in {"ddg", "wikipedia"}), "NONE")
+_ddg_only = _primary_provider == "NONE"
+logger.info(
+    "CORTEX_ENGINE_STARTUP provider_mode=%s available=%s primary=%s priority=%s brave_configured=%s tavily_configured=%s ddg_only=%s",
+    WEB_SEARCH_PROVIDER,
+    _available_providers,
+    _primary_provider,
+    WEB_SEARCH_PROVIDER_PRIORITY,
+    bool(BRAVE_SEARCH_API_KEY),
+    bool(TAVILY_API_KEY),
+    _ddg_only,
+)
+if _ddg_only:
+    logger.warning(
+        "CORTEX_ENGINE_WARNING: No premium search provider active (Brave/Tavily). "
+        "Live data quality is degraded — DDG-only mode. "
+        "Set BRAVE_SEARCH_API_KEY or TAVILY_API_KEY in the environment."
+    )
 chat_service = ChatService(llm=llm, chunks=chunks, web_search_tool=search_tool)
 embedded_scheduler: BackgroundScheduler | None = None
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024

@@ -33,14 +33,16 @@ Cite the most relevant source URLs inline when they directly support a claim.
 For any time-sensitive topic — current events, news, prices, sports scores, politics, company details,
 software versions, laws, regulations, product info, rankings, schedules, or anything about living people —
 rely exclusively on the provided web results. Do not fill gaps from training memory.
-If web results are provided but do not clearly answer the question, say so and give a best-effort answer.
-If no live results are available and the question is time-sensitive, do not invent a current fact from training memory.
-State that the live evidence is insufficient, summarize any partial live signal that is available, and avoid pretending stale knowledge is current.
+If web results are provided but do not contain the specific data requested, briefly note that the snippets were not specific enough,
+then immediately give your best-effort answer from your own knowledge — do not stop after saying the results were insufficient.
+If no live results are available and the question is time-sensitive, give your best honest answer based on what you know,
+and add a single brief caveat like "I could not confirm this from live sources this time."
 Never present stale training data as current fact. Never say 'as of my last update' or reference
 a past cutoff year as if it is reliable current information.
 Never say "unable to retrieve live data", "I don't have real-time access", "I cannot retrieve",
 "I cannot access real-time", "I don't have access to live data", or any similar refusal phrase.
 Always provide a direct, concrete, useful answer — never a dead end.
+Never end an answer by only saying results were insufficient or telling the user to check elsewhere without first giving your best answer.
 
 If runtime date/time context is provided, use it for questions about today's date, day, or time.
 If local notes and live results do not cover a non-time-sensitive question, use general knowledge and be clear when uncertain.
@@ -379,6 +381,25 @@ class ChatService:
 
     # Compiled class-level regex patterns — avoid per-call compilation overhead.
 
+    # Product/software release queries — "latest iPhone", "newest MacBook", etc.
+    _PRODUCT_RELEASE_RE = re.compile(
+        r'\b(?:latest|newest|current|new)\s+(?:iphone|ipad|macbook|mac\b|android|pixel|samsung|galaxy|'
+        r'windows|macos|ios|chatgpt|gpt-?4|gpt-?5|claude|gemini|llm|model|chip|processor)\b'
+        r'|\b(?:iphone|ipad|macbook|mac\b|android|pixel|galaxy)\s+(?:\d{1,2}|pro|air|max|ultra|plus|mini|se)\b'
+        r'|\bjust\s+(?:released|launched|announced|dropped)\b'
+        r'|\blatest\s+(?:version|model|update|release|announcement|firmware)\b'
+        r'|\bwhat(?:\s+is|\s+are)?\s+the\s+(?:latest|newest|current)\s+(?:iphone|ipad|mac|android|phone|laptop|chip|model)\b',
+        re.IGNORECASE,
+    )
+
+    # Schedules, standings, rankings, leaderboards.
+    _SCHEDULES_RANKINGS_RE = re.compile(
+        r'\b(?:schedule|standings?|rankings?|leaderboard|top\s+\d+|number\s+one|#\s*1|'
+        r'box\s+office|chart\b|charts\b|poll\b|polls\b|ratings?\b|most\s+popular|ranked|'
+        r'first\s+place|second\s+place|third\s+place)\b',
+        re.IGNORECASE,
+    )
+
     # Major recurring sports championship events.
     _SPORTS_EVENT_RE = re.compile(
         r'\b(?:super bowl|world series|stanley cup|march madness|nba finals?|world cup(?! of)|'
@@ -429,18 +450,26 @@ class ChatService:
     )
 
     # Categories that always require fresh live data regardless of time keywords.
+    # "general_factual" is included so the catch-all always searches with freshness.
     _FRESHNESS_ALWAYS_CATEGORIES: frozenset = frozenset({
-        "weather", "finance", "sports_event", "sports", "leadership", "news", "current_events",
+        "weather", "finance", "sports_event", "sports", "leadership",
+        "current_events_news", "schedules_rankings_records", "product_release_info",
+        "general_factual",
     })
 
-    # Time-reference words that make any general query freshness-sensitive.
+    # Time-reference words that make any remaining query freshness-sensitive.
     _FRESHNESS_TIME_RE = re.compile(
-        r'\b(?:202[5-9]|this year|right now|today|tonight|this week|this month)\b',
+        r'\b(?:202[4-9]|this year|right now|today|tonight|this week|this month|'
+        r'currently|at the moment|as of now|just now|breaking|latest|recent)\b',
         re.IGNORECASE,
     )
 
     def _classify_query(self, question: str) -> str:
-        """Return a category label for logging and routing. First match wins."""
+        """Return a category label for routing and freshness decisions. First match wins.
+
+        Categories that reach this method are all non-exempt (web search will run).
+        Every category except the non-factual ones is freshness-sensitive by default.
+        """
         q = question.lower()
         if self._needs_weather_context(question):
             return "weather"
@@ -452,11 +481,16 @@ class ChatService:
             return "sports"
         if self._LEADERSHIP_RE.search(q):
             return "leadership"
-        if self._needs_news_context(question):
-            return "news"
-        if self._is_current_events_query(question):
-            return "current_events"
-        return "general"
+        if self._PRODUCT_RELEASE_RE.search(question):
+            return "product_release_info"
+        # Unified news + current-events category.
+        if self._needs_news_context(question) or self._is_current_events_query(question):
+            return "current_events_news"
+        # Schedules, standings, rankings — almost always changing real-world data.
+        if self._SCHEDULES_RANKINGS_RE.search(question):
+            return "schedules_rankings_records"
+        # Default: treat everything else as general factual — live search first.
+        return "general_factual"
 
     def _web_queries(self, question: str, category: str | None = None) -> list[str]:
         query = question.strip()
@@ -477,6 +511,7 @@ class ChatService:
         # IMPORTANT: Never use "who won X" as-is — "won" is also the Korean currency (KRW/Won),
         # which causes search engines to return currency exchange results.
         # Always rewrite to "{EventName} {year} winner champion" form.
+        _extra_variants: list[str] | None = None  # set to a list to pre-fill the queries list
         if category == "sports_event":
             # Extract the canonical event name from the query.
             event_m = self._SPORTS_EVENT_RE.search(q_lower)
@@ -484,12 +519,20 @@ class ChatService:
                 event_name = event_m.group(0).title()
                 # Use "recap" and "score" to get game result articles, not landing/schedule pages.
                 primary = f"{event_name} {year} winner champion score recap"
+                # Simpler fallback variants so DDG can find results even when the full phrase fails.
+                _extra_variants = [
+                    f"{event_name} {year} winner",
+                    f"{event_name} {year} champion",
+                    f"{event_name} {year} result",
+                ]
             else:
                 stripped = re.sub(r'^(?:who won(?: the)?|who is winning|winner of|champions? of)\s+', '', clean, flags=re.IGNORECASE).strip()
                 primary = f"{stripped} {year} winner champion score recap"
+                _extra_variants = [f"{stripped} {year} winner", f"{stripped} {year}"]
 
         # Sports: scores, records, standings, game results.
-        # Add sport/league context to disambiguate team names ("Washington" → could be many things)
+        # Add sport/league context to disambiguate team names ("Washington" → could be many things).
+        # Strip duplicate stat words so we don't produce "wizards record NBA 2026 record standings".
         elif category == "sports":
             # Detect league from keywords in the query.
             sport_hint = ""
@@ -506,7 +549,20 @@ class ChatService:
                 league = sport_hint or "NBA"
                 primary = f"{league} standings top team best record {year}"
             elif sport_hint:
-                primary = f"{clean} {sport_hint} {year} record standings"
+                # Strip stat words already present in clean so we don't double them.
+                clean_stripped = re.sub(r'\b(?:record|standings?|score|result)\b', '', clean).strip()
+                if re.search(r'\b(?:record|standing|win|loss|stat)\b', q_lower):
+                    primary = f"{clean_stripped} {sport_hint} win loss record {year}"
+                    _extra_variants = [f"{clean_stripped} {sport_hint} standings wins losses {year}"]
+                    if sport_hint == "NBA":
+                        _extra_variants.extend([
+                            f"site:basketball-reference.com {clean_stripped} {year}",
+                            f"site:espn.com {clean_stripped} {sport_hint} record {year}",
+                        ])
+                elif re.search(r'\b(?:score|result|game|last night|yesterday)\b', q_lower):
+                    primary = f"{clean_stripped} {sport_hint} score result {year}"
+                else:
+                    primary = f"{clean_stripped} {sport_hint} {year}"
             else:
                 primary = f"{clean} {year} latest score result standings"
 
@@ -518,13 +574,15 @@ class ChatService:
         # Leadership queries: "who is the CEO of X", "who runs X", "CEO of OpenAI", etc.
         # Direct "{Org} {Role} current {year}" produces better search results.
         elif category == "leadership":
-            org_match = re.search(r'\b(?:ceo|president|cfo|cto|head|founder)\s+(?:of\s+)?([A-Za-z0-9 &.,\-]{2,50})', clean, re.IGNORECASE)
-            if not org_match:
-                org_match = re.search(r'\b(?:who\s+(?:runs?|leads?)\s+)([A-Za-z0-9 &.,\-]{2,50})', clean, re.IGNORECASE)
-            org = org_match.group(1).strip() if org_match else clean
-            role_match = re.search(r'\b(ceo|president|cfo|cto|head|founder|director)\b', clean, re.IGNORECASE)
-            role = role_match.group(1).upper() if role_match else "CEO"
-            primary = f"{org} {role} current {year}"
+            org, role = self._extract_leadership_target(clean)
+            org = org or clean
+            role = role or "CEO"
+            official_domain = self._infer_official_domain(org)
+            if official_domain:
+                primary = f"site:{official_domain} {org} {role} leadership"
+                _extra_variants = [f"{org} {role} current {year}", f"{org} leadership team {year}"]
+            else:
+                primary = f"{org} {role} current {year}"
 
         # Weather: use existing location extraction so we share the same stripping logic.
         elif category == "weather":
@@ -534,14 +592,36 @@ class ChatService:
             else:
                 primary = f"{clean} weather forecast today"
 
-        # "Latest news on X" or "what happened with X"
-        elif re.search(r'\b(?:latest news|what happened|news about|update on|updates on)\b', q_lower):
+        # Current events / news: rewrite to surface dated reporting.
+        elif category == "current_events_news":
+            if re.search(r'\b(?:latest news|what happened|news about|update on|updates on)\b', q_lower):
+                primary = f"{clean} {year}"
+            else:
+                primary = f"{clean} {year} news update"
+
+        # Product release: "latest iPhone", "newest MacBook", etc.
+        elif category == "product_release_info":
+            # Strip leading "what is the" / "what are the" noise.
+            stripped_prod = re.sub(r'^(?:what(?:\s+is|\s+are)?\s+the\s+)', '', clean, flags=re.IGNORECASE).strip()
+            primary = f"{stripped_prod} {year} release specs"
+
+        # Schedules, standings, rankings.
+        elif category == "schedules_rankings_records":
+            primary = f"{clean} {year} current latest"
+
+        # General factual catch-all: anchor with year so results skew recent.
+        elif category == "general_factual":
             primary = f"{clean} {year}"
 
-        # Finance: stock/price queries — keep the original; market context handles structured data.
-        # (no rewrite needed; market context fetches direct quotes)
+        # Finance: stock/price queries — keep the original; market context handles direct quotes.
+        # (no additional rewrite needed for stock queries; macro-finance gets targeted variants below)
+
+        if category == "finance" and self._is_policy_rate_query(question):
+            primary = f"Federal Reserve interest rate current {year} federal funds target range"
 
         queries = [primary]
+        if _extra_variants:
+            queries.extend(_extra_variants)
 
         # Add year-anchored and "latest" variants for freshness-sensitive categories or rewritten queries.
         # Exception: sports_event queries have year already embedded in the rewritten primary —
@@ -558,11 +638,26 @@ class ChatService:
                 if latest_query.lower().strip() not in normed:
                     queries.append(latest_query)
 
-        if category == "finance":
+        # Finance: only append broad market queries for equity/market queries, NOT macro (interest rates etc).
+        if category == "finance" and not self._MACRO_FINANCE_RE.search(question):
             queries.extend([
                 "stock market today S&P 500 Dow Nasdaq",
                 "SPY QQQ DIA market update today",
             ])
+        elif category == "finance" and self._MACRO_FINANCE_RE.search(question):
+            # Macro finance: interest rates, Fed, inflation — targeted variants.
+            if self._is_policy_rate_query(question):
+                queries.extend([
+                    f"Federal Reserve interest rate current {year} federal funds target rate",
+                    f"current federal funds rate {year}",
+                    f"FOMC target rate today {year}",
+                    f"Federal Reserve target range today {year}",
+                ])
+            else:
+                queries.extend([
+                    f"Federal Reserve interest rate current {year}",
+                    f"US interest rates today {year}",
+                ])
 
         deduped: list[str] = []
         seen: set[str] = set()
@@ -588,18 +683,65 @@ class ChatService:
         }
         return any(token in text for token in finance_tokens)
 
+    def _is_policy_rate_query(self, question: str) -> bool:
+        q = (question or "").lower()
+        if not self._MACRO_FINANCE_RE.search(q):
+            return False
+        consumer_rate_tokens = {
+            "mortgage", "refinance", "refi", "auto loan", "car loan", "student loan",
+            "credit card", "apr", "savings", "cd rate", "checking", "heloc", "personal loan",
+        }
+        if any(token in q for token in consumer_rate_tokens):
+            return False
+        return any(
+            token in q
+            for token in {
+                "interest rate", "federal reserve", "fed", "federal funds", "fed funds",
+                "benchmark rate", "policy rate", "central bank rate", "fomc",
+            }
+        )
+
+    def _extract_leadership_target(self, question: str) -> tuple[str | None, str | None]:
+        clean = (question or "").strip()
+        org_match = re.search(r'\b(?:ceo|president|cfo|cto|head|founder)\s+(?:of\s+)?([A-Za-z0-9 &.,\-]{2,50})', clean, re.IGNORECASE)
+        if not org_match:
+            org_match = re.search(r'\b(?:who\s+(?:runs?|leads?)\s+)([A-Za-z0-9 &.,\-]{2,50})', clean, re.IGNORECASE)
+        org = org_match.group(1).strip(" .,!?:;") if org_match else None
+        role_match = re.search(r'\b(ceo|president|cfo|cto|head|founder|director)\b', clean, re.IGNORECASE)
+        role = role_match.group(1).upper() if role_match else None
+        return org, role
+
+    def _infer_official_domain(self, org_name: str | None) -> str | None:
+        if not org_name:
+            return None
+        cleaned = re.sub(r'[^A-Za-z0-9 ]+', ' ', org_name).strip().lower()
+        tokens = [token for token in cleaned.split() if token and token not in {"the", "inc", "corp", "corporation", "company", "co", "llc", "ltd"}]
+        if not tokens:
+            return None
+        joined = "".join(tokens)
+        if len(joined) < 3:
+            return None
+        return f"{joined}.com"
+
     def _rank_web_results(self, results: list[dict], question: str) -> list[dict]:
         """Re-rank results to prefer authoritative sources for relevant query types."""
         if len(results) <= 1:
             return results
         q_lower = question.lower()
         authority_domains: set[str] = set()
+        policy_rate_query = self._is_policy_rate_query(question)
+        leadership_org, _ = self._extract_leadership_target(question)
+        leadership_domain = self._infer_official_domain(leadership_org)
         if re.search(r'\b(?:won|winner|score|champion|tournament|game|match|season|cup|title)\b', q_lower):
             authority_domains.update(_AUTHORITY_DOMAINS["sports"])
         if re.search(r'\b(?:stock|price|market|nasdaq|dow|share|etf|fund)\b', q_lower):
             authority_domains.update(_AUTHORITY_DOMAINS["finance"])
+        if policy_rate_query:
+            authority_domains.update({"federalreserve.gov", "newyorkfed.org", "reuters.com", "cmegroup.com"})
         if re.search(r'\b(?:ceo|president|founder|leader|executive|who (?:runs|leads))\b', q_lower):
             authority_domains.update(_AUTHORITY_DOMAINS["news"] | _AUTHORITY_DOMAINS["finance"])
+            if leadership_domain:
+                authority_domains.add(leadership_domain)
         if re.search(r'\b(?:law|regulation|policy|government|election|congress|senate)\b', q_lower):
             authority_domains.update(_AUTHORITY_DOMAINS["government"] | _AUTHORITY_DOMAINS["news"])
         if not authority_domains:
@@ -607,6 +749,24 @@ class ChatService:
 
         def _priority(item: dict) -> int:
             url = (item.get("url") or "").lower()
+            text = " ".join(
+                [
+                    str(item.get("title", "")),
+                    str(item.get("snippet", "")),
+                    str(item.get("url", "")),
+                ]
+            ).lower()
+            if policy_rate_query:
+                if any(domain in url for domain in ("federalreserve.gov", "newyorkfed.org", "cmegroup.com", "reuters.com")):
+                    return -2
+                if any(token in text for token in ("federal funds", "fomc", "target range", "benchmark rate", "policy rate")):
+                    return -1
+                if any(token in text for token in ("mortgage", "refinance", "home loan", "credit card")):
+                    return 2
+            if leadership_domain and leadership_domain in url:
+                return -2
+            if leadership_domain and any(token in url for token in ("/leadership", "/about", "/management", "/newsroom")):
+                return -1
             for domain in authority_domains:
                 if domain in url:
                     return 0
@@ -637,13 +797,14 @@ class ChatService:
             "\nInstruction: The LIVE WEB RESULTS above are the authoritative source. "
             "Base factual claims on them. Do not contradict or silently override them with training knowledge. "
             "Extract and state specific values directly from the snippets: exact numbers, names, scores, prices, dates, and records. "
+            "For standings, rankings, winners, and team-record questions, state the concrete team/result/record directly when the snippets support it. "
             "Prefer concrete facts over vague summaries. "
             "If results are incomplete or conflicting, say so briefly and still give your best-effort answer. "
             "Never say you cannot retrieve live data.\n"
         )
         return "\n".join(lines) + "\n\n"
 
-    def _web_results_relevant(self, results: list[dict], category: str) -> bool:
+    def _web_results_relevant(self, results: list[dict], category: str, question: str | None = None) -> bool:
         """True if at least one result contains topic-relevant content for the given category.
         Used to detect when a search returned homepage/aggregate results with no useful snippets.
         """
@@ -655,9 +816,57 @@ class ChatService:
                 "team", "season", "playoffs", "championship", "record", "wins", "losses",
                 "defeated", "beat", "won the", "tournament", "cup", "bowl", "series",
             }
+            q_lower = (question or "").lower()
+            require_record_context = bool(re.search(r"\b(?:record|standings?|wins?|losses?|best team|top team|number\s*one|#\s*1)\b", q_lower))
             for item in results:
                 text = (str(item.get("snippet", "")) + " " + str(item.get("title", ""))).lower()
+                if require_record_context:
+                    has_record_signal = bool(
+                        re.search(r"\b\d{1,2}\s*[-–]\s*\d{1,2}\b", text)
+                        or any(kw in text for kw in {"record", "standings", "wins", "losses", "top seed", "best record", "no. 1", "#1"})
+                    )
+                    if has_record_signal:
+                        return True
+                    continue
                 if any(kw in text for kw in sports_kw):
+                    return True
+            return False
+        if category == "product_release_info":
+            product_kw = {
+                "iphone", "ipad", "macbook", "apple", "android", "samsung", "galaxy", "pixel",
+                "release", "launched", "announced", "model", "specs", "features", "chip",
+                "processor", "display", "camera", "storage", "pro", "air", "max",
+            }
+            for item in results:
+                text = (str(item.get("snippet", "")) + " " + str(item.get("title", ""))).lower()
+                if any(kw in text for kw in product_kw):
+                    return True
+            return False
+        if category == "finance":
+            if self._is_policy_rate_query(question or ""):
+                policy_kw = {
+                    "fed", "federal reserve", "federal funds", "fed funds", "fomc",
+                    "target range", "benchmark rate", "policy rate", "central bank",
+                    "interest rate", "rate cut", "rate hike", "rate hold", "basis points",
+                    "bps", "percent", "%",
+                }
+                weak_consumer_kw = {"mortgage", "refinance", "home loan", "credit card", "apr", "savings"}
+                for item in results:
+                    text = (str(item.get("snippet", "")) + " " + str(item.get("title", "")) + " " + str(item.get("url", ""))).lower()
+                    if any(kw in text for kw in weak_consumer_kw) and not any(kw in text for kw in policy_kw):
+                        continue
+                    if any(kw in text for kw in policy_kw):
+                        return True
+                return False
+            finance_kw = {
+                "stock", "price", "rate", "interest", "fed", "federal reserve", "market",
+                "percent", "%", "yield", "bond", "inflation", "gdp", "nasdaq", "dow",
+                "s&p", "earnings", "dividend", "nyse", "trading", "shares", "equity",
+                "mortgage", "loan", "economy", "economic", "quarter", "annual",
+            }
+            for item in results:
+                text = (str(item.get("snippet", "")) + " " + str(item.get("title", ""))).lower()
+                if any(kw in text for kw in finance_kw):
                     return True
             return False
         return True
@@ -669,16 +878,26 @@ class ChatService:
             domains.update(_AUTHORITY_DOMAINS["sports"])
         elif category == "finance":
             domains.update(_AUTHORITY_DOMAINS["finance"])
-        elif category in ("leadership", "news", "current_events"):
+            if self._is_policy_rate_query(question):
+                domains.update({"federalreserve.gov", "newyorkfed.org", "cmegroup.com"})
+        elif category == "leadership":
+            domains.update(_AUTHORITY_DOMAINS["news"] | _AUTHORITY_DOMAINS["finance"])
+            org_name, _ = self._extract_leadership_target(question)
+            official_domain = self._infer_official_domain(org_name)
+            if official_domain:
+                domains.add(official_domain)
+        elif category in ("leadership", "current_events_news", "schedules_rankings_records", "general_factual"):
             domains.update(_AUTHORITY_DOMAINS["news"])
             if re.search(r"\b(?:government|president|prime minister|election|senate|congress|governor)\b", q_lower):
                 domains.update({domain for domain in _AUTHORITY_DOMAINS["government"] if not domain.startswith(".")})
+        elif category == "product_release_info":
+            domains.update({"theverge.com", "techcrunch.com", "apple.com", "9to5mac.com", "macrumors.com", "gsmarena.com"})
         return sorted(domain for domain in domains if "." in domain and not domain.startswith("."))
 
     def _results_quality(self, results: list[dict], category: str, question: str) -> tuple[bool, str]:
         if not results:
             return False, "empty_results"
-        relevant = self._web_results_relevant(results, category)
+        relevant = self._web_results_relevant(results, category, question)
         snippetful = 0
         provider_names: set[str] = set()
         authority_domains = set(self._preferred_domains_for_category(question, category))
@@ -691,7 +910,8 @@ class ChatService:
             url = (item.get("url") or "").lower()
             if any(domain in url for domain in authority_domains):
                 authority_hits += 1
-        if category in ("sports", "sports_event", "finance", "weather", "leadership", "news", "current_events") and not relevant:
+        if category in ("sports", "sports_event", "finance", "weather", "leadership",
+                        "current_events_news", "schedules_rankings_records", "product_release_info") and not relevant:
             return False, "irrelevant_results"
         if authority_domains and authority_hits == 0 and snippetful == 0:
             return False, "non_authoritative_results"
@@ -834,12 +1054,20 @@ class ChatService:
             last_reason = "no_attempt"
 
             for query in query_variants:
+                pre_len = len(merged)
+                pre_seen = set(seen_urls)
                 _search_provider(provider_name, query, use_fresh=fresh, domains=None, stage="primary")
                 provider_done, last_reason = _provider_satisfied(provider_name)
-                if provider_done or len(merged) >= max_results:
+                if provider_done:
                     break
+                # Roll back irrelevant/bad results so they don't fill the buffer
+                # and block later variants from being added.
+                if last_reason in ("irrelevant_results", "non_authoritative_results", "weak_snippets") and len(merged) > pre_len:
+                    del merged[pre_len:]
+                    seen_urls.clear()
+                    seen_urls.update(pre_seen)
 
-            if provider_done or len(merged) >= max_results:
+            if provider_done:
                 break
 
             if fresh:
@@ -856,7 +1084,9 @@ class ChatService:
                 if provider_done or len(merged) >= max_results:
                     break
 
-            if preferred_domains and category in ("sports", "sports_event", "finance", "leadership", "news", "current_events"):
+            if preferred_domains and category in ("sports", "sports_event", "finance", "leadership",
+                                                  "current_events_news", "schedules_rankings_records",
+                                                  "product_release_info", "general_factual"):
                 logger.info(
                     "web_search_provider_fallback provider=%s reason=%s action=authoritative_retry domains=%s",
                     provider_name,
@@ -1531,27 +1761,36 @@ class ChatService:
             return ""
 
     def _build_note_context_block(self, context: str, question: str, category: str, is_fresh: bool, web_results: list[dict]) -> str:
-        """Return BM25 note context block, suppressed for freshness-sensitive queries with live results."""
+        """Return BM25 note context block.
+
+        Suppressed for ALL freshness-sensitive queries — the knowledge base is static
+        and could contaminate factual/current answers even when search returns nothing.
+        """
         if not context:
             return ""
-        if is_fresh and web_results:
-            logger.info("notes_suppressed_freshness_sensitive category=%s web_results=%d", category, len(web_results))
+        if is_fresh:
+            logger.info("notes_suppressed_freshness_sensitive category=%s", category)
             return ""
         return f"Context from local notes:\n{context}\n\n"
 
     def _general_knowledge_instruction(self, is_fresh: bool) -> str:
         if is_fresh:
             return (
-                "Instruction: If local notes do not cover this, rely only on the live context provided here. "
-                "Do not fill current facts from training memory.\n\n"
+                "Instruction: Prioritize the live context above for current facts. "
+                "If the live results contain the specific data, use it. "
+                "If the live results do not directly answer the question, give your best-effort answer from your knowledge "
+                "and add one brief note that you could not confirm it from live sources this time. "
+                "Never refuse to answer or say only 'check elsewhere.'\n\n"
             )
         return "Instruction: If local notes do not cover this, answer from general knowledge.\n\n"
 
     def _live_only_instruction(self, is_fresh: bool) -> str:
         if is_fresh:
             return (
-                "Use only the live context provided above for current facts. "
-                "If it is incomplete, say the live evidence is incomplete and give the best answer supported by that live context only."
+                "Use the live context above if it contains the specific answer. "
+                "If the live context is incomplete or does not have the specific data, "
+                "give your best honest answer from your knowledge and note briefly that live confirmation was unavailable. "
+                "Always state a concrete answer — never end with only 'I could not verify.'"
             )
         return (
             "Give a direct answer using available live context or general knowledge. "
@@ -1629,7 +1868,7 @@ class ChatService:
         web_context = self._build_web_context_block(web_results)
         # For sports queries where DuckDuckGo returned only generic news homepages (no sports
         # content in snippets), fall back to Google News RSS for topic-specific headlines.
-        if category in ("sports", "sports_event") and web_results and not self._web_results_relevant(web_results, category):
+        if category in ("sports", "sports_event") and web_results and not self._web_results_relevant(web_results, category, question):
             logger.info("web_results_irrelevant_sports_fallback category=%s", category)
             topic_sports = self._topic_news_context(question)
             if topic_sports:
@@ -1638,36 +1877,32 @@ class ChatService:
 
         note_context_block = self._build_note_context_block(context, question, category, is_fresh, web_results)
         # has_live_signal: only count web_results as live signal if they're topically relevant.
-        has_live_signal = (bool(web_results) and self._web_results_relevant(web_results, category)) or bool(market_context.strip()) or bool(news_context.strip()) or bool(weather_context.strip())
+        has_live_signal = (bool(web_results) and self._web_results_relevant(web_results, category, question)) or bool(market_context.strip()) or bool(news_context.strip()) or bool(weather_context.strip())
         anti_refusal = "" if has_strong_note_context else self._general_knowledge_instruction(is_fresh)
         anti_stale = "Instruction: Use the live context provided above. Do not reference training cutoff dates.\n\n" if is_fresh and has_live_signal else ""
-        # When live search ran but returned nothing useful, the model must still commit to a concrete answer.
+        # When live search ran but returned no useful results, force an honest best-effort answer.
+        # Never allow the model to dead-end with only "could not be verified" — it must give the answer it believes is correct.
         no_live_push = (
-            "Instruction: Live web search ran but returned no results for this query. "
-            "Give your best-effort answer using general knowledge — state a concrete answer even if you must note it may not reflect the very latest data. "
-            "Do not say you cannot provide the information or tell the user to check elsewhere without first giving a direct answer.\n\n"
+            "Instruction: Live web search ran but did not return useful results for this query. "
+            "Give a direct, concrete best-effort answer using your knowledge. "
+            "State the answer first, then add a brief note such as 'I could not confirm this from live sources this time.' "
+            "NEVER respond with only 'could not be verified' or 'check elsewhere' — always provide the actual answer.\n\n"
         ) if is_fresh and _effective_web and not has_live_signal else ""
 
-        if is_fresh and _effective_web and not has_live_signal:
-            no_live_push = (
-                "Instruction: Live web search ran but returned no results for this query. "
-                "Use only any live context available in this prompt. "
-                "If there is still not enough live evidence, say the current answer could not be verified from live sources in this run. "
-                "Do not invent a current fact from training memory.\n\n"
-            )
-
+        # Prompt assembly order — most important context is placed CLOSEST to the question
+        # so the model weights it highest. Live web results come last before the question.
         messages.append(
             {
                 "role": "user",
                 "content": (
                     f"{runtime_context}"
+                    f"{profile_context}"
+                    f"{uploaded_file_context or ''}"
+                    f"{note_context_block}"
                     f"{weather_context}"
                     f"{market_context}"
                     f"{news_context}"
                     f"{web_context}"
-                    f"{profile_context}"
-                    f"{uploaded_file_context or ''}"
-                    f"{note_context_block}"
                     f"{anti_refusal}"
                     f"{anti_stale}"
                     f"{no_live_push}"
@@ -1685,12 +1920,12 @@ class ChatService:
                     "role": "user",
                     "content": (
                         f"{runtime_context}"
+                        f"{profile_context}"
+                        f"{uploaded_file_context or ''}"
                         f"{weather_context}"
                         f"{market_context}"
                         f"{news_context}"
                         f"{web_context}"
-                        f"{profile_context}"
-                        f"{uploaded_file_context or ''}"
                         f"Question: {question}\n\n"
                         f"{self._live_only_instruction(is_fresh)}"
                     ),
@@ -1708,12 +1943,12 @@ class ChatService:
                     "role": "user",
                     "content": (
                         f"{runtime_context}"
+                        f"{profile_context}"
+                        f"{uploaded_file_context or ''}"
                         f"{weather_context}"
                         f"{market_context}"
                         f"{news_context}"
                         f"{web_context}"
-                        f"{profile_context}"
-                        f"{uploaded_file_context or ''}"
                         f"Question: {question}\n\n"
                         "Give a direct, concrete, useful answer. "
                         "Do not say you cannot access real-time or live data. "
@@ -1739,8 +1974,8 @@ class ChatService:
                             "role": "user",
                             "content": (
                                 f"{runtime_context}"
-                                f"{web_context}"
                                 f"{profile_context}"
+                                f"{web_context}"
                                 f"Question: {question}\n\n"
                                 f"{self._live_only_instruction(is_fresh)}"
                             ),
@@ -1755,11 +1990,11 @@ class ChatService:
                         "role": "user",
                         "content": (
                             f"{runtime_context}"
+                            f"{profile_context}"
                             f"{weather_context}"
                             f"{market_context}"
                             f"{news_context}"
                             f"{web_context}"
-                            f"{profile_context}"
                             f"Question: {question}\n\n"
                             "Rewrite your answer using the LIVE WEB RESULTS above as the primary source. "
                             "Do not use training memory for current facts. Do not mention training cutoff dates."
@@ -1816,7 +2051,7 @@ class ChatService:
             tn = self._topic_news_context(question)
             if tn:
                 news_ctx += tn
-        if s_category in ("sports", "sports_event") and web_results and not self._web_results_relevant(web_results, s_category):
+        if s_category in ("sports", "sports_event") and web_results and not self._web_results_relevant(web_results, s_category, question):
             logger.info("web_results_irrelevant_sports_fallback_stream category=%s", s_category)
             tn = self._topic_news_context(question)
             if tn:
@@ -1824,22 +2059,17 @@ class ChatService:
             web_results = []
         web_ctx = self._build_web_context_block(web_results)
         note_blk = self._build_note_context_block(context, question, s_category, s_fresh, web_results)
-        live = (bool(web_results) and self._web_results_relevant(web_results, s_category)) or bool(market_ctx.strip()) or bool(news_ctx.strip()) or bool(weather_ctx.strip())
+        live = (bool(web_results) and self._web_results_relevant(web_results, s_category, question)) or bool(market_ctx.strip()) or bool(news_ctx.strip()) or bool(weather_ctx.strip())
         anti_r = "" if has_strong else self._general_knowledge_instruction(s_fresh)
         anti_s = ("Instruction: Use the live context provided above. Do not reference training cutoff dates.\n\n" if s_fresh and live else "")
         no_live_push_s = (
-            "Instruction: Live web search ran but returned no results for this query. "
-            "Give your best-effort answer using general knowledge — state a concrete answer even if you must note it may not reflect the very latest data. "
-            "Do not say you cannot provide the information or tell the user to check elsewhere without first giving a direct answer.\n\n"
+            "Instruction: Live web search ran but did not return useful results for this query. "
+            "Give a direct, concrete best-effort answer using your knowledge. "
+            "State the answer first, then add a brief note such as 'I could not confirm this from live sources this time.' "
+            "NEVER respond with only 'could not be verified' or 'check elsewhere' — always provide the actual answer.\n\n"
         ) if s_fresh and _effective_web and not live else ""
-        if s_fresh and _effective_web and not live:
-            no_live_push_s = (
-                "Instruction: Live web search ran but returned no results for this query. "
-                "Use only any live context available in this prompt. "
-                "If there is still not enough live evidence, say the current answer could not be verified from live sources in this run. "
-                "Do not invent a current fact from training memory.\n\n"
-            )
-        messages.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+web_ctx+profile_ctx+(uploaded_file_context or "")+note_blk+anti_r+anti_s+no_live_push_s+"User question:\n"+question})
+        # Prompt order: live web context closest to question for maximum grounding weight.
+        messages.append({"role": "user", "content": runtime_ctx+profile_ctx+(uploaded_file_context or "")+note_blk+weather_ctx+market_ctx+news_ctx+web_ctx+anti_r+anti_s+no_live_push_s+"User question:\n"+question})
         streamed = []
         try:
             for token in self.llm.chat_stream(messages=messages, model=model):
@@ -1852,7 +2082,7 @@ class ChatService:
         if self._looks_like_notes_refusal(answer):
             fbk = [{"role": "system", "content": SYSTEM_PROMPT}]
             fbk.extend(self._trim_history(eff_h))
-            fbk.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+web_ctx+profile_ctx+(uploaded_file_context or "")+"Question: "+question+"\n\n"+self._live_only_instruction(s_fresh)})
+            fbk.append({"role": "user", "content": runtime_ctx+profile_ctx+(uploaded_file_context or "")+weather_ctx+market_ctx+news_ctx+web_ctx+"Question: "+question+"\n\n"+self._live_only_instruction(s_fresh)})
             answer = self.llm.chat(messages=fbk, model=model)
             yield ("replace", answer)
 
@@ -1861,7 +2091,7 @@ class ChatService:
             logger.info("refusal_output_detected_stream question=%r — regenerating", question[:100])
             regen = [{"role": "system", "content": SYSTEM_PROMPT}]
             regen.extend(self._trim_history(eff_h))
-            regen.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+web_ctx+profile_ctx+(uploaded_file_context or "")+"Question: "+question+"\n\nGive a direct, concrete, useful answer. Do not say you cannot access real-time or live data. "+self._live_only_instruction(s_fresh)})
+            regen.append({"role": "user", "content": runtime_ctx+profile_ctx+(uploaded_file_context or "")+weather_ctx+market_ctx+news_ctx+web_ctx+"Question: "+question+"\n\nGive a direct, concrete, useful answer. Do not say you cannot access real-time or live data. "+self._live_only_instruction(s_fresh)})
             answer = self.llm.chat(messages=regen, model=model)
             yield ("replace", answer)
         if s_fresh and self._looks_stale_current_answer(answer):
@@ -1872,13 +2102,13 @@ class ChatService:
                 else:
                     sf = [{"role": "system", "content": SYSTEM_PROMPT}]
                     sf.extend(self._trim_history(eff_h))
-                    sf.append({"role": "user", "content": runtime_ctx+web_ctx+profile_ctx+"Question: "+question+"\n\n"+self._live_only_instruction(s_fresh)})
+                    sf.append({"role": "user", "content": runtime_ctx+profile_ctx+web_ctx+"Question: "+question+"\n\n"+self._live_only_instruction(s_fresh)})
                     answer = self.llm.chat(messages=sf, model=model)
                 yield ("replace", answer)
             else:
                 sf = [{"role": "system", "content": SYSTEM_PROMPT}]
                 sf.extend(self._trim_history(eff_h))
-                sf.append({"role": "user", "content": runtime_ctx+weather_ctx+market_ctx+news_ctx+web_ctx+profile_ctx+"Question: "+question+"\n\nRewrite your answer using the LIVE WEB RESULTS above as the primary source. Do not use training memory for current facts. Do not mention training cutoff dates."})
+                sf.append({"role": "user", "content": runtime_ctx+profile_ctx+weather_ctx+market_ctx+news_ctx+web_ctx+"Question: "+question+"\n\nRewrite your answer using the LIVE WEB RESULTS above as the primary source. Do not use training memory for current facts. Do not mention training cutoff dates."})
                 answer = self.llm.chat(messages=sf, model=model)
                 yield ("replace", answer)
         if self._needs_market_context(question):

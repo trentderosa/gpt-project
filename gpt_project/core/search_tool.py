@@ -316,6 +316,15 @@ class CompositeWebSearchTool(WebSearchTool):
                 ordered.append(provider.provider_name)
         return ordered
 
+    # Categories where Wikipedia is useless and only DDG is allowed as a fallback.
+    _LIVE_DATA_CATEGORIES: frozenset = frozenset({
+        "weather", "finance", "sports", "sports_event", "leadership",
+        "current_events_news", "schedules_rankings_records", "product_release_info",
+        "general_factual",
+        # Legacy names kept for any callers that haven't been updated yet.
+        "news", "current_events",
+    })
+
     def provider_sequence(self, category: str | None = None, fresh: bool = False) -> list[str]:
         ordered = self._ordered_provider_names()
         primaries = [name for name in ordered if name not in {"ddg", "wikipedia"}]
@@ -323,7 +332,9 @@ class CompositeWebSearchTool(WebSearchTool):
         sequence = list(primaries)
         if self.ddg_fallback_only and "ddg" in fallbacks:
             fallbacks = [name for name in fallbacks if name != "ddg"] + ["ddg"]
-        if fresh or category in {"weather", "finance", "sports", "sports_event", "leadership", "news", "current_events"}:
+        # For any freshness-sensitive or live-data category, drop Wikipedia from fallbacks
+        # (Wikipedia is static; it never helps for current-events, finance, sports, etc.).
+        if fresh or category in self._LIVE_DATA_CATEGORIES:
             return sequence + [name for name in fallbacks if name == "ddg"]
         return sequence + fallbacks
 
@@ -433,15 +444,24 @@ def build_search_tool(
         ddg_fallback_only=True,
     )
     if provider_mode in {"auto", "multi", "brave", "tavily"}:
+        available = tool.available_providers()
+        has_premium = any(p not in {"ddg", "wikipedia"} for p in available)
+        primary = next((p for p in available if p not in {"ddg", "wikipedia"}), "none")
         logger.info(
-            "web_search_tool_configured mode=%s providers=%s priority=%s brave=%s tavily=%s",
+            "cortex_search_configured mode=%s available_providers=%s priority=%s primary=%s brave=%s tavily=%s ddg_only=%s",
             provider_mode,
-            tool.available_providers(),
+            available,
             resolved_priority,
+            primary,
             bool(brave_key),
             bool(tavily_key),
+            not has_premium,
         )
-        if not brave_key and not tavily_key:
-            logger.warning("web_search_primary_providers_missing mode=%s providers=%s", provider_mode, tool.available_providers())
+        if not has_premium:
+            logger.warning(
+                "CORTEX_SEARCH_WARNING: No premium provider configured (Brave/Tavily). "
+                "System is DDG-only — live data quality will be significantly degraded. "
+                "Set BRAVE_SEARCH_API_KEY or TAVILY_API_KEY to enable a premium provider."
+            )
         return tool
     return DisabledWebSearchTool()
