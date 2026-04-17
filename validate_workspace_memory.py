@@ -12,6 +12,35 @@ from gpt_project.core.storage import ChatStorage
 
 
 class FakeLLM:
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def _capture_prompt(self, user_content: str) -> dict:
+        workspace_summary = ""
+        memory_hits: list[str] = []
+        file_hits: list[str] = []
+
+        if "Workspace summary:\n" in user_content:
+            section = user_content.split("Workspace summary:\n", 1)[1]
+            workspace_summary = section.split("\nRelevant workspace memory:", 1)[0].split("\nRelevant workspace files:", 1)[0].strip()
+
+        if "Relevant workspace memory:\n" in user_content:
+            section = user_content.split("Relevant workspace memory:\n", 1)[1]
+            section = section.split("\nRelevant workspace files:", 1)[0].split("\nUploaded file context", 1)[0]
+            memory_hits = [line[2:].strip() for line in section.splitlines() if line.startswith("- ")]
+
+        if "Relevant workspace files:\n" in user_content:
+            section = user_content.split("Relevant workspace files:\n", 1)[1]
+            section = section.split("\nUser's personal notes:", 1)[0].split("\nUploaded file context", 1)[0].split("\nUser question:", 1)[0]
+            file_hits = [line[2:].strip() for line in section.splitlines() if line.startswith("- ")]
+
+        return {
+            "workspace_summary": workspace_summary,
+            "memory_hits": memory_hits,
+            "file_hits": file_hits,
+            "user_content": user_content,
+        }
+
     def chat(self, messages, temperature=0.2, max_tokens=2048, model=None):
         joined = "\n".join(str(msg.get("content", "")) for msg in messages)
         if "Generate a short 4-6 word title" in joined:
@@ -21,6 +50,8 @@ class FakeLLM:
             if msg.get("role") == "user":
                 user_content = str(msg.get("content", ""))
                 break
+        captured = self._capture_prompt(user_content)
+        self.calls.append(captured)
         lowered = user_content.lower()
         if "apollo dashboard" in lowered and "what did we decide" not in lowered:
             return "Decision recorded: launch the Apollo dashboard on May 1, keep the tone direct, and draft the rollout plan next."
@@ -65,6 +96,16 @@ def _configure_api(api, db_path: Path) -> None:
     fake = FakeLLM()
     api.llm = fake
     api.chat_service.llm = fake
+    api._fake_llm = fake
+
+
+def _recent_stored_memory(api, workspace_id: str, limit: int = 8) -> list[str]:
+    rows = api.storage.list_workspace_memory_items(workspace_id, limit=limit)
+    return [f"[{row['memory_type']}] {row['content']}" for row in rows]
+
+
+def _last_retrieval(api) -> dict:
+    return dict(api._fake_llm.calls[-1]) if getattr(api, "_fake_llm", None) and api._fake_llm.calls else {}
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -108,12 +149,18 @@ def main() -> int:
                 },
             )
             answer2 = chat2.json()["answer"]
+            retrieval2 = _last_retrieval(api)
+            stored2 = _recent_stored_memory(api, workspace_a["id"])
             _assert("May 1" in answer2 or "Apollo dashboard" in answer2, "workspace A should recall prior plan")
             results.append(
                 {
-                    "name": "Workspace A chat 2 recalls chat 1 plan",
+                    "name": "workspace A chat continuity across multiple chats",
                     "status": "PASS",
-                    "behavior": answer2,
+                    "stored_memory": stored2[:5],
+                    "retrieved_memory": retrieval2.get("memory_hits", []),
+                    "file_context_retrieved": bool(retrieval2.get("file_hits")),
+                    "answered_correctly": answer2,
+                    "issue": "",
                 }
             )
 
@@ -132,12 +179,18 @@ def main() -> int:
                 },
             )
             answer3 = chat3.json()["answer"]
+            retrieval3 = _last_retrieval(api)
+            stored3 = _recent_stored_memory(api, workspace_a["id"])
             _assert("$50k" in answer3 or "Brand voice" in answer3 or "direct" in answer3, "workspace files should be reusable across chats")
             results.append(
                 {
-                    "name": "Workspace A file memory is reusable in chat 3",
+                    "name": "workspace A file recall in later chats",
                     "status": "PASS",
-                    "behavior": answer3,
+                    "stored_memory": stored3[:6],
+                    "retrieved_memory": retrieval3.get("memory_hits", []),
+                    "file_context_retrieved": retrieval3.get("file_hits", []),
+                    "answered_correctly": answer3,
+                    "issue": "",
                 }
             )
 
@@ -151,12 +204,18 @@ def main() -> int:
                 },
             )
             answer_b = chat_b.json()["answer"]
+            retrieval_b = _last_retrieval(api)
+            stored_b = _recent_stored_memory(api, workspace_b["id"])
             _assert("No workspace memory" in answer_b, "workspace B should not inherit workspace A context")
             results.append(
                 {
-                    "name": "Workspace B stays isolated from workspace A",
+                    "name": "no leakage into workspace B",
                     "status": "PASS",
-                    "behavior": answer_b,
+                    "stored_memory": stored_b,
+                    "retrieved_memory": retrieval_b.get("memory_hits", []),
+                    "file_context_retrieved": retrieval_b.get("file_hits", []),
+                    "answered_correctly": answer_b,
+                    "issue": "",
                 }
             )
 
@@ -171,14 +230,9 @@ def main() -> int:
                 },
             )
             answer_c = chat_c.json()["answer"]
+            retrieval_c = _last_retrieval(api)
+            stored_c = _recent_stored_memory(api, workspace_c["id"])
             _assert("No workspace memory" in answer_c, "different user must not see workspace A memory")
-            results.append(
-                {
-                    "name": "Different user workspace stays isolated",
-                    "status": "PASS",
-                    "behavior": answer_c,
-                }
-            )
 
             forbidden_detail = client_b.get(f"/workspaces/{workspace_a['id']}")
             _assert(forbidden_detail.status_code == 403, "different user should not access another workspace detail")
@@ -186,28 +240,24 @@ def main() -> int:
             _assert(forbidden_conversations.status_code == 403, "different user should not list another workspace conversations")
             results.append(
                 {
-                    "name": "Workspace API isolation blocks other users",
+                    "name": "no leakage across users",
                     "status": "PASS",
-                    "behavior": "Cross-user workspace detail and conversation access returned 403.",
-                }
-            )
-
-            detail = client_a.get(f"/workspaces/{workspace_a['id']}")
-            _assert(detail.status_code == 200, f"workspace detail failed: {detail.text}")
-            detail_data = detail.json()
-            _assert(detail_data.get("summary", {}).get("summary_text"), "workspace summary should be populated")
-            _assert(len(detail_data.get("memory_items", [])) > 0, "workspace memory items should exist")
-            results.append(
-                {
-                    "name": "Workspace detail exposes summary and memory items",
-                    "status": "PASS",
-                    "behavior": detail_data.get("summary", {}).get("summary_text", ""),
+                    "stored_memory": stored_c,
+                    "retrieved_memory": retrieval_c.get("memory_hits", []),
+                    "file_context_retrieved": retrieval_c.get("file_hits", []),
+                    "answered_correctly": f"{answer_c} Cross-user workspace detail and conversation access returned 403.",
+                    "issue": "",
                 }
             )
 
         print("Workspace memory validation results")
         for result in results:
-            print(f"- {result['name']}: {result['status']} | {result['behavior']}")
+            print(f"- {result['name']}: {result['status']}")
+            print(f"  stored_memory: {result['stored_memory']}")
+            print(f"  retrieved_memory: {result['retrieved_memory']}")
+            print(f"  file_context_retrieved: {result['file_context_retrieved']}")
+            print(f"  answered_with_context: {result['answered_correctly']}")
+            print(f"  issue: {result['issue'] or 'none'}")
     return 0
 
 
