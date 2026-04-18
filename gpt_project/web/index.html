@@ -890,20 +890,19 @@
           <button id="leaveWorkspaceBtn" class="section-toggle-btn" type="button">Leave</button>
         </div>
         <div id="workspaceBrowserPanel" class="workspace-browser">
-          <div class="workspace-header-note">Workspaces act like project containers: related chats, files, and memory stay together while you are inside one.</div>
+          <div class="workspace-header-note">Workspaces keep related chats, files, and memory together — like projects.</div>
           <ul id="workspaceList" class="knowledge-list"></ul>
           <div id="workspaceCreator" class="workspace-creator" style="display:none;">
-            <div class="workspace-empty">Create a workspace to keep project decisions, tasks, files, and chat memory together.</div>
             <div class="workspace-row">
-            <input id="newWorkspaceName" class="workspace-input" type="text" placeholder="New workspace name" maxlength="80">
-            <button id="createWorkspaceBtn" class="auth-secondary" type="button">+ Create</button>
+              <input id="newWorkspaceName" class="workspace-input" type="text" placeholder="New workspace name" maxlength="80">
+              <button id="createWorkspaceBtn" class="auth-secondary" type="button">+ Create</button>
+            </div>
           </div>
-          </div>
+          <button id="toggleWorkspaceCreatorBtn" class="auth-secondary" type="button" style="margin-top:2px;">+ New Workspace</button>
           <div id="activeWorkspacePanel" class="workspace-panel" style="display:none;">
             <div id="activeWorkspaceName" class="workspace-panel-name"></div>
             <div class="workspace-meta-row">
               <span id="activeWorkspaceScope" class="workspace-chip muted">General workspace context</span>
-              <button id="toggleWorkspaceCreatorBtn" class="section-toggle-btn" type="button">New Workspace</button>
             </div>
             <div id="activeWorkspaceSummary" style="font-size:11px;color:var(--muted);line-height:1.45;margin-bottom:6px;"></div>
             <div class="knowledge-title" style="margin-top:8px;">Workspace Chats</div>
@@ -945,9 +944,8 @@
         <div id="attachmentTray" class="attachment-tray" aria-live="polite"></div>
         <div id="starterPrompts" class="starter-prompts">
           <button class="starter-chip" type="button" data-action="weather">Weather</button>
-          <button class="starter-chip" type="button" data-action="markets">Markets</button>
+          <button class="starter-chip" type="button" data-action="markets">Stocks</button>
           <button class="starter-chip" type="button" data-action="ai_news">AI News</button>
-          <button class="starter-chip" type="button" data-action="resume">Resume Help</button>
         </div>
       </form>
     </main>
@@ -1104,7 +1102,7 @@
     function setWorkspaceCreatorOpen(open) {
       workspaceCreatorOpen = !!open;
       if (workspaceCreatorEl) workspaceCreatorEl.style.display = workspaceCreatorOpen ? "" : "none";
-      if (toggleWorkspaceCreatorBtnEl) toggleWorkspaceCreatorBtnEl.textContent = workspaceCreatorOpen ? "Hide Creator" : "New Workspace";
+      if (toggleWorkspaceCreatorBtnEl) toggleWorkspaceCreatorBtnEl.textContent = workspaceCreatorOpen ? "Hide" : "+ New Workspace";
       if (workspaceCreatorOpen) {
         setWorkspaceBrowserOpen(true);
         setTimeout(() => newWorkspaceNameEl?.focus(), 0);
@@ -2173,9 +2171,9 @@
           }
         }
         if (!(data.workspaces || []).length) {
-          workspaceListEl.innerHTML = "<li class='workspace-empty'>No workspaces yet.</li>";
+          workspaceListEl.innerHTML = "<li class='workspace-empty'>No workspaces yet. Click \"+ Create\" below to get started.</li>";
           renderWorkspaceConversationList([]);
-          setWorkspaceCreatorOpen(true);
+          if (workspaceBrowserOpen) setWorkspaceCreatorOpen(true);
         }
         if (restoredWorkspace) {
           activeWorkspace = restoredWorkspace;
