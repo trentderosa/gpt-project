@@ -1042,6 +1042,7 @@ class ChatStorage:
             ).fetchone()
         workspace = dict(row)
         workspace["conversation_count"] = 0
+        workspace["role"] = "owner"
         return workspace
 
     def get_workspace(self, workspace_id: str) -> dict | None:
