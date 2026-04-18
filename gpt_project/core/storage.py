@@ -1040,7 +1040,9 @@ class ChatStorage:
                 "SELECT id, name, owner_user_id, created_at FROM workspaces WHERE id = ?",
                 (workspace_id,),
             ).fetchone()
-        return dict(row)
+        workspace = dict(row)
+        workspace["conversation_count"] = 0
+        return workspace
 
     def get_workspace(self, workspace_id: str) -> dict | None:
         with self._connect() as conn:
@@ -1054,7 +1056,17 @@ class ChatStorage:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT w.id, w.name, w.owner_user_id, w.created_at, wm.role
+                SELECT
+                    w.id,
+                    w.name,
+                    w.owner_user_id,
+                    w.created_at,
+                    wm.role,
+                    (
+                        SELECT COUNT(1)
+                        FROM conversations c
+                        WHERE c.workspace_id = w.id
+                    ) AS conversation_count
                 FROM workspaces w
                 JOIN workspace_members wm ON wm.workspace_id = w.id
                 WHERE wm.user_id = ?

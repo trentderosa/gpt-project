@@ -651,6 +651,11 @@
       cursor: pointer;
       flex-shrink: 0;
     }
+    .section-toggle-btn.primary {
+      background: var(--brand-soft);
+      color: var(--brand);
+      border-color: #c3deff;
+    }
     .knowledge-title { font-size: 12px; color: var(--muted); margin-bottom: 6px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
     .knowledge-list { list-style: none; margin: 6px 0 0 0; padding: 0; display: grid; gap: 4px; max-height: 160px; overflow-y: auto; }
     .knowledge-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; background: #fff; }
@@ -658,6 +663,21 @@
     .knowledge-del-btn { border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 14px; padding: 0 2px; line-height: 1; }
     .knowledge-del-btn:hover { color: var(--error); }
     .workspace-section { margin-top: 6px; display: grid; gap: 6px; }
+    .workspace-browser {
+      display: none;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px;
+      background: var(--panel);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
+      gap: 8px;
+    }
+    .workspace-browser.open { display: grid; }
+    .workspace-header-note {
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.45;
+    }
     .workspace-creator { display: grid; gap: 4px; }
     .workspace-empty { font-size: 11px; color: var(--muted); padding: 4px 0; }
     .workspace-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; background: #fff; cursor: pointer; }
@@ -668,6 +688,78 @@
     .workspace-panel-name { font-size: 12px; font-weight: 700; margin-bottom: 6px; color: var(--ink); }
     .workspace-input { font-size: 11px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); flex: 1; min-width: 0; }
     .workspace-row { display: flex; gap: 4px; margin-top: 4px; }
+    .workspace-meta-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .workspace-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid #c3deff;
+      background: var(--brand-soft);
+      color: var(--brand);
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-size: 11px;
+      font-weight: 700;
+      font-family: "Space Grotesk", sans-serif;
+    }
+    .workspace-chip.muted {
+      color: var(--muted);
+      background: transparent;
+      border-color: var(--line);
+    }
+    #headerWorkspaceBadge { cursor: pointer; }
+    .workspace-chat-list {
+      list-style: none;
+      margin: 6px 0 0 0;
+      padding: 0;
+      display: grid;
+      gap: 4px;
+      max-height: 180px;
+      overflow-y: auto;
+    }
+    .workspace-chat-btn {
+      width: 100%;
+      text-align: left;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      border-radius: 9px;
+      padding: 7px 8px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .workspace-chat-btn.active {
+      border-color: var(--accent);
+      background: var(--accent-pale);
+    }
+    .workspace-chat-title {
+      display: block;
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .workspace-chat-meta {
+      display: block;
+      color: var(--muted);
+      margin-top: 3px;
+    }
+    .workspace-active-bar {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      margin-top: 4px;
+      flex-wrap: wrap;
+    }
+    .workspace-active-bar.visible { display: flex; }
     .dark-toggle {
       border: 1px solid var(--line);
       background: var(--bot);
@@ -791,27 +883,40 @@
       <div id="workspaceSection" class="workspace-section" style="display:none;">
         <div class="section-title-row">
           <div class="knowledge-title" style="margin-bottom:0;">Workspaces</div>
-          <button id="toggleWorkspaceCreatorBtn" class="section-toggle-btn" type="button">New</button>
+          <button id="workspaceToggleBtn" class="section-toggle-btn primary" type="button">Open</button>
         </div>
-        <ul id="workspaceList" class="knowledge-list"></ul>
-        <div id="workspaceCreator" class="workspace-creator" style="display:none;">
-          <div class="workspace-empty">Create a workspace to keep project decisions, tasks, files, and chat memory together.</div>
-          <div class="workspace-row">
-          <input id="newWorkspaceName" class="workspace-input" type="text" placeholder="New workspace name" maxlength="80">
-          <button id="createWorkspaceBtn" class="auth-secondary" type="button">+ Create</button>
+        <div id="workspaceActiveBar" class="workspace-active-bar">
+          <span id="workspaceActiveBadge" class="workspace-chip"></span>
+          <button id="leaveWorkspaceBtn" class="section-toggle-btn" type="button">Leave</button>
         </div>
-        </div>
-        <div id="activeWorkspacePanel" class="workspace-panel" style="display:none;">
-          <div id="activeWorkspaceName" class="workspace-panel-name"></div>
-          <div id="activeWorkspaceSummary" style="font-size:11px;color:var(--muted);line-height:1.45;margin-bottom:6px;"></div>
-          <div class="workspace-row">
-            <input id="inviteEmail" class="workspace-input" type="email" placeholder="Invite by email">
-            <button id="inviteBtn" class="auth-secondary" type="button">Invite</button>
+        <div id="workspaceBrowserPanel" class="workspace-browser">
+          <div class="workspace-header-note">Workspaces act like project containers: related chats, files, and memory stay together while you are inside one.</div>
+          <ul id="workspaceList" class="knowledge-list"></ul>
+          <div id="workspaceCreator" class="workspace-creator" style="display:none;">
+            <div class="workspace-empty">Create a workspace to keep project decisions, tasks, files, and chat memory together.</div>
+            <div class="workspace-row">
+            <input id="newWorkspaceName" class="workspace-input" type="text" placeholder="New workspace name" maxlength="80">
+            <button id="createWorkspaceBtn" class="auth-secondary" type="button">+ Create</button>
           </div>
-          <div class="knowledge-title" style="margin-top:8px;">Shared Files</div>
-          <ul id="workspaceFilesList" class="knowledge-list"></ul>
-          <button id="uploadWorkspaceNoteBtn" class="auth-secondary" type="button" style="margin-top:4px;">+ Upload to Workspace</button>
-          <input id="workspaceNoteFileInput" type="file" style="display:none" accept=".txt,.md,.pdf,.docx">
+          </div>
+          <div id="activeWorkspacePanel" class="workspace-panel" style="display:none;">
+            <div id="activeWorkspaceName" class="workspace-panel-name"></div>
+            <div class="workspace-meta-row">
+              <span id="activeWorkspaceScope" class="workspace-chip muted">General workspace context</span>
+              <button id="toggleWorkspaceCreatorBtn" class="section-toggle-btn" type="button">New Workspace</button>
+            </div>
+            <div id="activeWorkspaceSummary" style="font-size:11px;color:var(--muted);line-height:1.45;margin-bottom:6px;"></div>
+            <div class="knowledge-title" style="margin-top:8px;">Workspace Chats</div>
+            <ul id="workspaceConversationList" class="workspace-chat-list"></ul>
+            <div class="workspace-row">
+              <input id="inviteEmail" class="workspace-input" type="email" placeholder="Invite by email">
+              <button id="inviteBtn" class="auth-secondary" type="button">Invite</button>
+            </div>
+            <div class="knowledge-title" style="margin-top:8px;">Shared Files</div>
+            <ul id="workspaceFilesList" class="knowledge-list"></ul>
+            <button id="uploadWorkspaceNoteBtn" class="auth-secondary" type="button" style="margin-top:4px;">+ Upload to Workspace</button>
+            <input id="workspaceNoteFileInput" type="file" style="display:none" accept=".txt,.md,.pdf,.docx">
+          </div>
         </div>
       </div>
       </div>
@@ -825,6 +930,7 @@
       <header>
         <div>
           <div class="title">Conversation</div>
+          <div id="headerWorkspaceBadge" class="workspace-chip muted" style="display:none;margin-top:6px;"></div>
         </div>
         <div class="header-actions">
           <button id="toggleSidebarBtn" class="sidebar-toggle" type="button">Hide Sidebar</button>
@@ -905,6 +1011,11 @@
     const noteFileInputEl = document.getElementById("noteFileInput");
     const notesListEl = document.getElementById("notesList");
     const workspaceSectionEl = document.getElementById("workspaceSection");
+    const workspaceToggleBtnEl = document.getElementById("workspaceToggleBtn");
+    const workspaceBrowserPanelEl = document.getElementById("workspaceBrowserPanel");
+    const workspaceActiveBarEl = document.getElementById("workspaceActiveBar");
+    const workspaceActiveBadgeEl = document.getElementById("workspaceActiveBadge");
+    const leaveWorkspaceBtnEl = document.getElementById("leaveWorkspaceBtn");
     const workspaceListEl = document.getElementById("workspaceList");
     const toggleWorkspaceCreatorBtnEl = document.getElementById("toggleWorkspaceCreatorBtn");
     const workspaceCreatorEl = document.getElementById("workspaceCreator");
@@ -912,13 +1023,17 @@
     const createWorkspaceBtnEl = document.getElementById("createWorkspaceBtn");
     const activeWorkspacePanelEl = document.getElementById("activeWorkspacePanel");
     const activeWorkspaceNameEl = document.getElementById("activeWorkspaceName");
+    const activeWorkspaceScopeEl = document.getElementById("activeWorkspaceScope");
     const activeWorkspaceSummaryEl = document.getElementById("activeWorkspaceSummary");
+    const workspaceConversationListEl = document.getElementById("workspaceConversationList");
     const inviteEmailEl = document.getElementById("inviteEmail");
     const inviteBtnEl = document.getElementById("inviteBtn");
     const workspaceFilesListEl = document.getElementById("workspaceFilesList");
     const uploadWorkspaceNoteBtnEl = document.getElementById("uploadWorkspaceNoteBtn");
     const workspaceNoteFileInputEl = document.getElementById("workspaceNoteFileInput");
+    const headerWorkspaceBadgeEl = document.getElementById("headerWorkspaceBadge");
     let activeWorkspace = null;
+    let workspaceBrowserOpen = false;
     let workspaceCreatorOpen = false;
     let lastUserMessage = null;
     let lastBotBubble = null;
@@ -957,12 +1072,65 @@
       }
     }
 
+    function renderWorkspaceIndicators() {
+      const hasWorkspace = !!activeWorkspace;
+      if (workspaceActiveBarEl) workspaceActiveBarEl.classList.toggle("visible", hasWorkspace);
+      if (workspaceActiveBadgeEl) {
+        workspaceActiveBadgeEl.textContent = hasWorkspace ? `Inside ${activeWorkspace.name}` : "";
+      }
+      if (headerWorkspaceBadgeEl) {
+        headerWorkspaceBadgeEl.style.display = hasWorkspace ? "" : "none";
+        headerWorkspaceBadgeEl.textContent = hasWorkspace
+          ? `Workspace: ${activeWorkspace.name}`
+          : "";
+      }
+      if (activeWorkspaceScopeEl) {
+        activeWorkspaceScopeEl.textContent = hasWorkspace
+          ? "New chats, files, and memory stay inside this workspace."
+          : "General workspace context";
+      }
+    }
+
+    function setWorkspaceBrowserOpen(open) {
+      workspaceBrowserOpen = !!open;
+      if (workspaceBrowserPanelEl) workspaceBrowserPanelEl.classList.toggle("open", workspaceBrowserOpen);
+      if (workspaceToggleBtnEl) workspaceToggleBtnEl.textContent = workspaceBrowserOpen ? "Close" : "Open";
+      if (workspaceBrowserOpen && isMobile()) {
+        asideEl.classList.add("mobile-open");
+        applySidebarState();
+      }
+    }
+
     function setWorkspaceCreatorOpen(open) {
       workspaceCreatorOpen = !!open;
       if (workspaceCreatorEl) workspaceCreatorEl.style.display = workspaceCreatorOpen ? "" : "none";
-      if (toggleWorkspaceCreatorBtnEl) toggleWorkspaceCreatorBtnEl.textContent = workspaceCreatorOpen ? "Close" : "New";
+      if (toggleWorkspaceCreatorBtnEl) toggleWorkspaceCreatorBtnEl.textContent = workspaceCreatorOpen ? "Hide Creator" : "New Workspace";
       if (workspaceCreatorOpen) {
+        setWorkspaceBrowserOpen(true);
         setTimeout(() => newWorkspaceNameEl?.focus(), 0);
+      }
+    }
+
+    function renderWorkspaceConversationList(conversations = []) {
+      if (!workspaceConversationListEl) return;
+      workspaceConversationListEl.innerHTML = "";
+      if (!conversations.length) {
+        workspaceConversationListEl.innerHTML = "<li class='workspace-empty'>No chats in this workspace yet. Start one and the conversation will stay here.</li>";
+        return;
+      }
+      for (const convo of conversations) {
+        const li = document.createElement("li");
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "workspace-chat-btn" + (convo.conversation_id === conversationId ? " active" : "");
+        btn.innerHTML = `<span class="workspace-chat-title">${escapeHtml(convo.title || convo.preview || "Workspace chat")}</span><span class="workspace-chat-meta">${fmtDate(convo.last_message_at || convo.created_at)}</span>`;
+        btn.addEventListener("click", async () => {
+          setConversationId(convo.conversation_id);
+          await loadConversation();
+          await refreshConversationList();
+        });
+        li.appendChild(btn);
+        workspaceConversationListEl.appendChild(li);
       }
     }
 
@@ -1094,9 +1262,13 @@
         authStatusEl.textContent = "Not logged in. Free mode may be limited.";
         if (notesListEl) notesListEl.innerHTML = "";
         activeWorkspace = null;
+        workspaceBrowserOpen = false;
+        setWorkspaceBrowserOpen(false);
         setWorkspaceCreatorOpen(false);
         activeWorkspacePanelEl.style.display = "none";
         activeWorkspaceSummaryEl.textContent = "";
+        renderWorkspaceConversationList([]);
+        renderWorkspaceIndicators();
       }
     }
 
@@ -1551,27 +1723,20 @@
           return;
         }
         const data = await res.json();
-        if (data.workspace_id && (!activeWorkspace || activeWorkspace.id !== data.workspace_id) && currentUser) {
-          try {
-            const wsRes = await apiFetch("/workspaces/" + data.workspace_id);
-            if (wsRes.ok) {
-              const wsData = await wsRes.json();
-              activeWorkspace = wsData.workspace || activeWorkspace;
-              if (activeWorkspace) {
-                localStorage.setItem(WORKSPACE_KEY, activeWorkspace.id);
-                activeWorkspaceNameEl.textContent = activeWorkspace.name;
-                activeWorkspacePanelEl.style.display = "";
-                activeWorkspaceSummaryEl.textContent = wsData.summary?.summary_text || "Workspace memory is active across chats in this project.";
-                await refreshWorkspaceFiles();
-              }
-            }
-          } catch (_) {}
+        if (data.workspace_id && currentUser) {
+          await setActiveWorkspace(
+            { id: data.workspace_id, name: activeWorkspace?.name || "Workspace" },
+            { keepConversation: true, preserveChat: true, announce: false, openBrowser: true }
+          );
+        } else if (!data.workspace_id && activeWorkspace) {
+          clearActiveWorkspace({ resetConversation: false, clearChat: false, announce: false });
         }
         chatEl.innerHTML = "";
         for (const msg of data.messages.slice(-60)) {
           addBubble(msg.content, msg.role === "user" ? "user" : "bot");
         }
         addMeta("Conversation restored.");
+        await refreshConversationList();
       } catch (_) {
         // Ignore restore failures and continue with a fresh visible window.
       }
@@ -1700,7 +1865,11 @@
       uploadedFileNames = [];
       fileInputEl.value = "";
       renderAttachmentTray();
-      addMeta("New conversation started.");
+      if (activeWorkspace) {
+        addMeta(`New workspace chat started in ${activeWorkspace.name}.`);
+      } else {
+        addMeta("New conversation started.");
+      }
       refreshConversationList();
       promptEl.focus();
     });
@@ -1960,6 +2129,27 @@
       noteFileInputEl.value = "";
     });
 
+    async function loadWorkspaceDetail(workspaceId) {
+      if (!workspaceId) return null;
+      try {
+        const res = await apiFetch("/workspaces/" + workspaceId);
+        if (!res.ok) return null;
+        const data = await res.json();
+        activeWorkspace = data.workspace || activeWorkspace;
+        if (activeWorkspace) {
+          localStorage.setItem(WORKSPACE_KEY, activeWorkspace.id);
+          activeWorkspaceNameEl.textContent = activeWorkspace.name;
+          activeWorkspacePanelEl.style.display = "";
+          activeWorkspaceSummaryEl.textContent = data.summary?.summary_text || "Workspace memory is active across chats in this project.";
+          renderWorkspaceConversationList(data.conversations || []);
+          renderWorkspaceIndicators();
+        }
+        return data;
+      } catch (_) {
+        return null;
+      }
+    }
+
     async function refreshWorkspaces() {
       if (!currentUser || !workspaceListEl) return;
       try {
@@ -1974,14 +2164,9 @@
           const li = document.createElement("li");
           const isActive = !!targetWorkspaceId && targetWorkspaceId === ws.id;
           li.className = "workspace-item" + (isActive ? " active" : "");
-          li.innerHTML = `<span class="workspace-item-name" title="${escapeHtml(ws.name)}">${escapeHtml(ws.name)}</span><span style="font-size:10px;color:var(--muted);">${escapeHtml(ws.role)}</span>`;
-          li.addEventListener("click", () => {
-            if (activeWorkspace && activeWorkspace.id === ws.id) {
-              clearActiveWorkspace();
-              return;
-            }
-            setActiveWorkspace(ws);
-          });
+          const convoCount = Number(ws.conversation_count || 0);
+          li.innerHTML = `<span class="workspace-item-name" title="${escapeHtml(ws.name)}">${escapeHtml(ws.name)}</span><span style="font-size:10px;color:var(--muted);">${convoCount} chats</span>`;
+          li.addEventListener("click", () => setActiveWorkspace(ws, { announce: !isActive, openBrowser: true, keepConversation: isActive, preserveChat: isActive }));
           workspaceListEl.appendChild(li);
           if (isActive) {
             restoredWorkspace = ws;
@@ -1989,55 +2174,68 @@
         }
         if (!(data.workspaces || []).length) {
           workspaceListEl.innerHTML = "<li class='workspace-empty'>No workspaces yet.</li>";
+          renderWorkspaceConversationList([]);
           setWorkspaceCreatorOpen(true);
         }
         if (restoredWorkspace) {
           activeWorkspace = restoredWorkspace;
-          activeWorkspaceNameEl.textContent = activeWorkspace.name;
-          activeWorkspacePanelEl.style.display = "";
-          activeWorkspaceSummaryEl.textContent = "Workspace memory is active across chats in this project.";
-          refreshWorkspaceFiles();
+          renderWorkspaceIndicators();
+          await loadWorkspaceDetail(activeWorkspace.id);
+          await refreshWorkspaceFiles();
         } else if (savedWorkspaceId) {
           activeWorkspace = null;
           localStorage.removeItem(WORKSPACE_KEY);
           activeWorkspaceNameEl.textContent = "";
           activeWorkspaceSummaryEl.textContent = "";
           activeWorkspacePanelEl.style.display = "none";
+          renderWorkspaceConversationList([]);
+          renderWorkspaceIndicators();
         }
       } catch (_) {}
     }
 
-    function clearActiveWorkspace() {
+    function clearActiveWorkspace(options = {}) {
+      const {
+        resetConversation = true,
+        clearChat = true,
+        announce = true,
+      } = options;
       activeWorkspace = null;
       localStorage.removeItem(WORKSPACE_KEY);
       activeWorkspaceNameEl.textContent = "";
       activeWorkspaceSummaryEl.textContent = "";
       activeWorkspacePanelEl.style.display = "none";
-      setConversationId(null);
-      chatEl.innerHTML = "";
-      addMeta("Workspace context cleared. You're back in general chat.");
+      if (workspaceFilesListEl) workspaceFilesListEl.innerHTML = "";
+      if (inviteEmailEl) inviteEmailEl.value = "";
+      renderWorkspaceConversationList([]);
+      renderWorkspaceIndicators();
+      if (resetConversation) setConversationId(null);
+      if (clearChat) chatEl.innerHTML = "";
+      if (announce) addMeta("Workspace context cleared. You're back in general chat.");
       refreshWorkspaces();
       refreshConversationList();
     }
 
-    async function setActiveWorkspace(ws) {
-      activeWorkspace = ws;
-      localStorage.setItem(WORKSPACE_KEY, ws.id);
+    async function setActiveWorkspace(ws, options = {}) {
+      const {
+        keepConversation = false,
+        preserveChat = false,
+        announce = true,
+        openBrowser = true,
+      } = options;
+      activeWorkspace = ws ? { ...activeWorkspace, ...ws } : null;
+      if (!activeWorkspace?.id) return;
+      localStorage.setItem(WORKSPACE_KEY, activeWorkspace.id);
+      if (openBrowser) setWorkspaceBrowserOpen(true);
       setWorkspaceCreatorOpen(false);
-      activeWorkspaceNameEl.textContent = ws.name;
+      activeWorkspaceNameEl.textContent = activeWorkspace.name || "Workspace";
       activeWorkspacePanelEl.style.display = "";
       activeWorkspaceSummaryEl.textContent = "Workspace memory is active across chats in this project.";
-      setConversationId(null);
-      chatEl.innerHTML = "";
-      addMeta(`Workspace active: ${ws.name}. New chats will reuse this workspace's memory and files.`);
-      try {
-        const res = await apiFetch("/workspaces/" + ws.id);
-        if (res.ok) {
-          const data = await res.json();
-          const summary = data.summary?.summary_text || "Workspace memory is active across chats in this project.";
-          activeWorkspaceSummaryEl.textContent = summary;
-        }
-      } catch (_) {}
+      renderWorkspaceIndicators();
+      if (!keepConversation) setConversationId(null);
+      if (!preserveChat) chatEl.innerHTML = "";
+      if (announce) addMeta(`Workspace active: ${activeWorkspace.name}. New chats will stay inside this project container.`);
+      await loadWorkspaceDetail(activeWorkspace.id);
       await refreshWorkspaceFiles();
       await refreshWorkspaces();
       await refreshConversationList();
@@ -2077,7 +2275,21 @@
         await setActiveWorkspace(workspace);
       } catch (err) { addBubble("Error: " + err.message, "bot", "error"); }
     });
+    workspaceToggleBtnEl?.addEventListener("click", async () => {
+      const nextOpen = !workspaceBrowserOpen;
+      setWorkspaceBrowserOpen(nextOpen);
+      if (nextOpen && currentUser) {
+        await refreshWorkspaces();
+      }
+    });
+    headerWorkspaceBadgeEl?.addEventListener("click", async () => {
+      setWorkspaceBrowserOpen(true);
+      if (currentUser) {
+        await refreshWorkspaces();
+      }
+    });
     toggleWorkspaceCreatorBtnEl?.addEventListener("click", () => setWorkspaceCreatorOpen(!workspaceCreatorOpen));
+    leaveWorkspaceBtnEl?.addEventListener("click", () => clearActiveWorkspace());
     newWorkspaceNameEl?.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
