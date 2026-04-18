@@ -18,6 +18,9 @@
       --line: #cad8ea;
       --brand: #4f9dff;
       --brand-soft: #d7e9ff;
+      --accent: #4f9dff;
+      --accent-pale: #e8f0fe;
+      --hover: #f3f8ff;
       --user: #eef6ff;
       --bot: #ffffff;
       --error: #9d2f2f;
@@ -39,6 +42,9 @@
       --line: #30363d;
       --brand: #58a6ff;
       --brand-soft: #1f3a5a;
+      --accent: #58a6ff;
+      --accent-pale: #17304b;
+      --hover: #1b2430;
       --user: #1a2840;
       --bot: #1c2128;
       --error: #f85149;
@@ -113,8 +119,20 @@
       flex-direction: column;
       gap: 16px;
       background: var(--aside-bg);
-      overflow: hidden;
+      overflow-y: auto;
+      overflow-x: hidden;
+      min-height: 0;
       transition: opacity 0.2s ease, padding 0.25s ease;
+    }
+    .sidebar-scroll {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding-right: 2px;
     }
     .logo {
       font-family: "Space Grotesk", sans-serif;
@@ -531,7 +549,8 @@
       #chat { padding-bottom: 18px; }
     }
     .history-wrap {
-      min-height: 0;
+      flex: 1 1 auto;
+      min-height: 160px;
       display: grid;
       grid-template-rows: auto 1fr;
       margin-top: 4px;
@@ -565,7 +584,7 @@
       overflow-y: auto;
       display: grid;
       gap: 6px;
-      max-height: 320px;
+      max-height: 200px;
     }
     .history-item {
       display: flex;
@@ -620,13 +639,27 @@
       margin-top: 8px;
     }
     .knowledge-section { margin-top: 6px; }
+    .section-title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .section-toggle-btn {
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      border-radius: 8px;
+      padding: 5px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
     .knowledge-title { font-size: 12px; color: var(--muted); margin-bottom: 6px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
-    .knowledge-list { list-style: none; margin: 6px 0 0 0; padding: 0; display: grid; gap: 4px; max-height: 140px; overflow-y: auto; }
+    .knowledge-list { list-style: none; margin: 6px 0 0 0; padding: 0; display: grid; gap: 4px; max-height: 160px; overflow-y: auto; }
     .knowledge-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; background: #fff; }
     .knowledge-item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .knowledge-del-btn { border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 14px; padding: 0 2px; line-height: 1; }
     .knowledge-del-btn:hover { color: var(--error); }
-    .workspace-section { margin-top: 6px; }
+    .workspace-section { margin-top: 6px; display: grid; gap: 6px; }
+    .workspace-creator { display: grid; gap: 4px; }
+    .workspace-empty { font-size: 11px; color: var(--muted); padding: 4px 0; }
     .workspace-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; background: #fff; cursor: pointer; }
     .workspace-item:hover { background: var(--hover); }
     .workspace-item.active { border-color: var(--accent); background: var(--accent-pale, #e8f0fe); font-weight: 700; }
@@ -744,6 +777,7 @@
         <button id="logoutBtn" type="button" class="btn" style="display:none;padding:8px 10px;">Logout</button>
         <div id="authStatus" class="auth-user">Not logged in. Free mode may be limited.</div>
       </div>
+      <div class="sidebar-scroll">
       <div class="history-wrap">
         <div class="history-title">Past Conversations</div>
         <ul id="historyList" class="history-list"></ul>
@@ -755,11 +789,17 @@
         <ul id="notesList" class="knowledge-list"></ul>
       </div>
       <div id="workspaceSection" class="workspace-section" style="display:none;">
-        <div class="knowledge-title">Workspaces</div>
+        <div class="section-title-row">
+          <div class="knowledge-title" style="margin-bottom:0;">Workspaces</div>
+          <button id="toggleWorkspaceCreatorBtn" class="section-toggle-btn" type="button">New</button>
+        </div>
         <ul id="workspaceList" class="knowledge-list"></ul>
-        <div class="workspace-row">
+        <div id="workspaceCreator" class="workspace-creator" style="display:none;">
+          <div class="workspace-empty">Create a workspace to keep project decisions, tasks, files, and chat memory together.</div>
+          <div class="workspace-row">
           <input id="newWorkspaceName" class="workspace-input" type="text" placeholder="New workspace name" maxlength="80">
           <button id="createWorkspaceBtn" class="auth-secondary" type="button">+ Create</button>
+        </div>
         </div>
         <div id="activeWorkspacePanel" class="workspace-panel" style="display:none;">
           <div id="activeWorkspaceName" class="workspace-panel-name"></div>
@@ -773,6 +813,7 @@
           <button id="uploadWorkspaceNoteBtn" class="auth-secondary" type="button" style="margin-top:4px;">+ Upload to Workspace</button>
           <input id="workspaceNoteFileInput" type="file" style="display:none" accept=".txt,.md,.pdf,.docx">
         </div>
+      </div>
       </div>
       <div class="legal-links">
         <a href="/privacy" target="_blank" rel="noopener">Privacy</a>
@@ -843,6 +884,7 @@
     function isMobile() { return window.innerWidth <= 920; }
     const starterPromptsEl = document.getElementById("starterPrompts");
     const KEY = "trent_gpt_conversation_id";
+    const RECENT_CONVERSATIONS_KEY = "cortex_recent_conversation_ids";
     const SIDEBAR_KEY = "cortex_sidebar_hidden";
     const DARK_KEY = "cortex_dark_mode";
     const MODEL_KEY = "cortex_model";
@@ -864,6 +906,8 @@
     const notesListEl = document.getElementById("notesList");
     const workspaceSectionEl = document.getElementById("workspaceSection");
     const workspaceListEl = document.getElementById("workspaceList");
+    const toggleWorkspaceCreatorBtnEl = document.getElementById("toggleWorkspaceCreatorBtn");
+    const workspaceCreatorEl = document.getElementById("workspaceCreator");
     const newWorkspaceNameEl = document.getElementById("newWorkspaceName");
     const createWorkspaceBtnEl = document.getElementById("createWorkspaceBtn");
     const activeWorkspacePanelEl = document.getElementById("activeWorkspacePanel");
@@ -875,9 +919,62 @@
     const uploadWorkspaceNoteBtnEl = document.getElementById("uploadWorkspaceNoteBtn");
     const workspaceNoteFileInputEl = document.getElementById("workspaceNoteFileInput");
     let activeWorkspace = null;
+    let workspaceCreatorOpen = false;
     let lastUserMessage = null;
     let lastBotBubble = null;
     let authRuntime = null;
+
+    function loadRecentConversationIds() {
+      try {
+        const parsed = JSON.parse(localStorage.getItem(RECENT_CONVERSATIONS_KEY) || "[]");
+        return Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string" && id.trim()) : [];
+      } catch (_) {
+        return [];
+      }
+    }
+
+    function storeRecentConversationIds(ids) {
+      localStorage.setItem(RECENT_CONVERSATIONS_KEY, JSON.stringify(ids.slice(0, 30)));
+    }
+
+    function rememberConversationId(id) {
+      const normalized = String(id || "").trim();
+      if (!normalized) return;
+      const deduped = [normalized, ...loadRecentConversationIds().filter((item) => item !== normalized)];
+      storeRecentConversationIds(deduped);
+    }
+
+    function setConversationId(id, options = {}) {
+      const normalized = String(id || "").trim();
+      conversationId = normalized || null;
+      if (!conversationId) {
+        localStorage.removeItem(KEY);
+        return;
+      }
+      localStorage.setItem(KEY, conversationId);
+      if (options.remember !== false) {
+        rememberConversationId(conversationId);
+      }
+    }
+
+    function setWorkspaceCreatorOpen(open) {
+      workspaceCreatorOpen = !!open;
+      if (workspaceCreatorEl) workspaceCreatorEl.style.display = workspaceCreatorOpen ? "" : "none";
+      if (toggleWorkspaceCreatorBtnEl) toggleWorkspaceCreatorBtnEl.textContent = workspaceCreatorOpen ? "Close" : "New";
+      if (workspaceCreatorOpen) {
+        setTimeout(() => newWorkspaceNameEl?.focus(), 0);
+      }
+    }
+
+    async function claimRememberedConversations() {
+      const remembered = loadRecentConversationIds();
+      if (!remembered.length) return;
+      await apiFetch("/conversations/claim_many", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversation_ids: remembered }),
+      }).catch(() => {});
+    }
 
     function applyDarkMode() {
       document.documentElement.classList.toggle("dark", darkMode);
@@ -963,6 +1060,7 @@
     async function apiFetch(url, options = {}) {
       const opts = { ...options };
       opts.headers = { ...(opts.headers || {}) };
+      opts.credentials = "include";
       return fetch(url, opts);
     }
 
@@ -974,8 +1072,7 @@
     }
 
     function resetConversationState() {
-      conversationId = null;
-      localStorage.removeItem(KEY);
+      setConversationId(null);
     }
 
     function setAuthState(user) {
@@ -997,6 +1094,7 @@
         authStatusEl.textContent = "Not logged in. Free mode may be limited.";
         if (notesListEl) notesListEl.innerHTML = "";
         activeWorkspace = null;
+        setWorkspaceCreatorOpen(false);
         activeWorkspacePanelEl.style.display = "none";
         activeWorkspaceSummaryEl.textContent = "";
       }
@@ -1334,8 +1432,7 @@
               }
               throw new Error(uploadData.detail || "Upload failed");
             }
-            conversationId = uploadData.conversation_id;
-            localStorage.setItem(KEY, conversationId);
+            setConversationId(uploadData.conversation_id);
             uploadedFileNames.push(uploadData.filename || file.name);
             addMeta(`Attached ${uploadData.filename}`);
           }
@@ -1395,8 +1492,7 @@
             let parsed = null;
             try { parsed = JSON.parse(dataStr); } catch (_) { continue; }
             if (eventName === "meta" && parsed?.conversation_id) {
-              conversationId = parsed.conversation_id;
-              localStorage.setItem(KEY, conversationId);
+              setConversationId(parsed.conversation_id);
             } else if (eventName === "token" && parsed?.token) {
               builtAnswer += parsed.token;
               revealBubbleContent(bubble, builtAnswer);
@@ -1415,8 +1511,7 @@
         }
 
         if (finalPayload?.conversation_id) {
-          conversationId = finalPayload.conversation_id;
-          localStorage.setItem(KEY, conversationId);
+          setConversationId(finalPayload.conversation_id);
         }
         const finalAnswer = finalPayload?.answer || builtAnswer || "No response generated.";
         revealBubbleContent(bubble, finalAnswer);
@@ -1456,6 +1551,22 @@
           return;
         }
         const data = await res.json();
+        if (data.workspace_id && (!activeWorkspace || activeWorkspace.id !== data.workspace_id) && currentUser) {
+          try {
+            const wsRes = await apiFetch("/workspaces/" + data.workspace_id);
+            if (wsRes.ok) {
+              const wsData = await wsRes.json();
+              activeWorkspace = wsData.workspace || activeWorkspace;
+              if (activeWorkspace) {
+                localStorage.setItem(WORKSPACE_KEY, activeWorkspace.id);
+                activeWorkspaceNameEl.textContent = activeWorkspace.name;
+                activeWorkspacePanelEl.style.display = "";
+                activeWorkspaceSummaryEl.textContent = wsData.summary?.summary_text || "Workspace memory is active across chats in this project.";
+                await refreshWorkspaceFiles();
+              }
+            }
+          } catch (_) {}
+        }
         chatEl.innerHTML = "";
         for (const msg of data.messages.slice(-60)) {
           addBubble(msg.content, msg.role === "user" ? "user" : "bot");
@@ -1484,8 +1595,7 @@
           return;
         }
         if (conversationId === convId) {
-          conversationId = null;
-          localStorage.removeItem(KEY);
+          setConversationId(null);
           chatEl.innerHTML = "";
           addMeta("Conversation deleted. Start a new one.");
         }
@@ -1497,11 +1607,18 @@
 
     async function refreshConversationList() {
       try {
-        const query = activeWorkspace?.id ? `/conversations?limit=50&workspace_id=${encodeURIComponent(activeWorkspace.id)}` : "/conversations?limit=50";
+        const includeIds = !activeWorkspace ? loadRecentConversationIds().join(",") : "";
+        const query = activeWorkspace?.id
+          ? `/conversations?limit=50&workspace_id=${encodeURIComponent(activeWorkspace.id)}`
+          : `/conversations?limit=50${includeIds ? `&include_ids=${encodeURIComponent(includeIds)}` : ""}`;
         const res = await apiFetch(query);
         if (!res.ok) return;
         const data = await res.json();
         historyListEl.innerHTML = "";
+        if (!(data.conversations || []).length) {
+          historyListEl.innerHTML = "<li style='font-size:11px;color:var(--muted);padding:4px 0;'>No saved conversations yet.</li>";
+          return;
+        }
         for (const convo of data.conversations || []) {
           const li = document.createElement("li");
           li.className = "history-item";
@@ -1511,8 +1628,7 @@
           const workspaceTag = convo.workspace_id ? " • workspace" : "";
           btn.innerHTML = `<span class="history-preview">${escapeHtml(convo.title || convo.preview || "New conversation")}</span><span class="history-time">${fmtDate(convo.last_message_at || convo.created_at)}${workspaceTag}</span>`;
           btn.addEventListener("click", async () => {
-            conversationId = convo.conversation_id;
-            localStorage.setItem(KEY, conversationId);
+            setConversationId(convo.conversation_id);
             await loadConversation();
             await refreshConversationList();
             promptEl.focus();
@@ -1578,8 +1694,7 @@
     });
 
     newChatEl.addEventListener("click", () => {
-      conversationId = null;
-      localStorage.removeItem(KEY);
+      setConversationId(null);
       chatEl.innerHTML = "";
       pendingFiles = [];
       uploadedFileNames = [];
@@ -1639,7 +1754,7 @@
       const password = authPasswordEl.value;
       if (!email || !password) return;
       try {
-        const res = await fetch("/auth/login", {
+        const res = await apiFetch("/auth/login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email, password })
@@ -1651,13 +1766,25 @@
         chatEl.innerHTML = "";
         addMeta("Signed in.");
         await refreshMe();
+        await claimRememberedConversations();
+
+        // Claim the pre-login anonymous conversation so it appears in history.
+        if (conversationId) {
+          await apiFetch("/conversations/claim", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ conversation_id: conversationId }),
+          }).catch(() => {});
+        }
+
+        // Load most recent conversation (now includes just-claimed one).
         const _lr = await apiFetch("/conversations?limit=1");
         if (_lr.ok) {
           const _ld = await _lr.json();
           const _lc = _ld.conversations?.[0];
-          if (_lc) { conversationId = _lc.conversation_id; localStorage.setItem(KEY, conversationId); await loadConversation(); }
-          else { conversationId = null; localStorage.removeItem(KEY); }
-        } else { conversationId = null; localStorage.removeItem(KEY); }
+          if (_lc) { setConversationId(_lc.conversation_id); await loadConversation(); }
+          else { setConversationId(null); }
+        } else { setConversationId(null); }
         await refreshNotes();
         await refreshWorkspaces();
         await refreshConversationList();
@@ -1671,7 +1798,7 @@
       const password = authPasswordEl.value;
       if (!email || !password) return;
       try {
-        const res = await fetch("/auth/register", {
+        const res = await apiFetch("/auth/register", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email, password })
@@ -1680,8 +1807,7 @@
         if (!res.ok) throw new Error(data.detail || "Registration failed");
         setAuthState(data.user);
         authPasswordEl.value = "";
-        conversationId = null;
-        localStorage.removeItem(KEY);
+        setConversationId(null);
         chatEl.innerHTML = "";
         addMeta("Account created and signed in.");
         await refreshMe();
@@ -1707,7 +1833,7 @@
         return;
       }
       try {
-        const res = await fetch("/auth/reset_password_email", {
+        const res = await apiFetch("/auth/reset_password_email", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email, new_password: newPassword })
@@ -1752,8 +1878,7 @@
         await apiFetch("/auth/logout", { method: "POST" });
       } catch (_) {}
       setAuthState(null);
-      conversationId = null;
-      localStorage.removeItem(KEY);
+      setConversationId(null);
       chatEl.innerHTML = "";
       addMeta("Logged out.");
       refreshConversationList();
@@ -1842,11 +1967,13 @@
         if (!res.ok) return;
         const data = await res.json();
         const savedWorkspaceId = localStorage.getItem(WORKSPACE_KEY);
-        const shouldRestore = !activeWorkspace && savedWorkspaceId;
+        const targetWorkspaceId = activeWorkspace?.id || savedWorkspaceId || null;
+        let restoredWorkspace = null;
         workspaceListEl.innerHTML = "";
         for (const ws of data.workspaces || []) {
           const li = document.createElement("li");
-          li.className = "workspace-item" + (activeWorkspace && activeWorkspace.id === ws.id ? " active" : "");
+          const isActive = !!targetWorkspaceId && targetWorkspaceId === ws.id;
+          li.className = "workspace-item" + (isActive ? " active" : "");
           li.innerHTML = `<span class="workspace-item-name" title="${escapeHtml(ws.name)}">${escapeHtml(ws.name)}</span><span style="font-size:10px;color:var(--muted);">${escapeHtml(ws.role)}</span>`;
           li.addEventListener("click", () => {
             if (activeWorkspace && activeWorkspace.id === ws.id) {
@@ -1856,15 +1983,26 @@
             setActiveWorkspace(ws);
           });
           workspaceListEl.appendChild(li);
-          if (shouldRestore && ws.id === savedWorkspaceId) {
-            activeWorkspace = ws;
+          if (isActive) {
+            restoredWorkspace = ws;
           }
         }
-        if (shouldRestore && activeWorkspace) {
+        if (!(data.workspaces || []).length) {
+          workspaceListEl.innerHTML = "<li class='workspace-empty'>No workspaces yet.</li>";
+          setWorkspaceCreatorOpen(true);
+        }
+        if (restoredWorkspace) {
+          activeWorkspace = restoredWorkspace;
           activeWorkspaceNameEl.textContent = activeWorkspace.name;
           activeWorkspacePanelEl.style.display = "";
           activeWorkspaceSummaryEl.textContent = "Workspace memory is active across chats in this project.";
           refreshWorkspaceFiles();
+        } else if (savedWorkspaceId) {
+          activeWorkspace = null;
+          localStorage.removeItem(WORKSPACE_KEY);
+          activeWorkspaceNameEl.textContent = "";
+          activeWorkspaceSummaryEl.textContent = "";
+          activeWorkspacePanelEl.style.display = "none";
         }
       } catch (_) {}
     }
@@ -1875,8 +2013,7 @@
       activeWorkspaceNameEl.textContent = "";
       activeWorkspaceSummaryEl.textContent = "";
       activeWorkspacePanelEl.style.display = "none";
-      conversationId = null;
-      localStorage.removeItem(KEY);
+      setConversationId(null);
       chatEl.innerHTML = "";
       addMeta("Workspace context cleared. You're back in general chat.");
       refreshWorkspaces();
@@ -1886,11 +2023,11 @@
     async function setActiveWorkspace(ws) {
       activeWorkspace = ws;
       localStorage.setItem(WORKSPACE_KEY, ws.id);
+      setWorkspaceCreatorOpen(false);
       activeWorkspaceNameEl.textContent = ws.name;
       activeWorkspacePanelEl.style.display = "";
       activeWorkspaceSummaryEl.textContent = "Workspace memory is active across chats in this project.";
-      conversationId = null;
-      localStorage.removeItem(KEY);
+      setConversationId(null);
       chatEl.innerHTML = "";
       addMeta(`Workspace active: ${ws.name}. New chats will reuse this workspace's memory and files.`);
       try {
@@ -1935,9 +2072,17 @@
         if (!res.ok) { const d = await res.json(); addBubble("Error: " + (d.detail || "Could not create workspace"), "bot", "error"); return; }
         const workspace = await res.json();
         newWorkspaceNameEl.value = "";
+        setWorkspaceCreatorOpen(false);
         await refreshWorkspaces();
         await setActiveWorkspace(workspace);
       } catch (err) { addBubble("Error: " + err.message, "bot", "error"); }
+    });
+    toggleWorkspaceCreatorBtnEl?.addEventListener("click", () => setWorkspaceCreatorOpen(!workspaceCreatorOpen));
+    newWorkspaceNameEl?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        createWorkspaceBtnEl.click();
+      }
     });
 
     inviteBtnEl.addEventListener("click", async () => {
@@ -1971,7 +2116,11 @@
     initLocationHint();
     applySidebarState();
     applyDarkMode();
-    Promise.all([refreshAuthRuntime(), refreshMe(), loadConversation(), refreshConversationList(), refreshNotes(), refreshWorkspaces()]).finally(() => {
+    (async () => {
+      await refreshAuthRuntime();
+      await refreshMe();
+      await Promise.all([loadConversation(), refreshConversationList(), refreshNotes(), refreshWorkspaces()]);
+    })().finally(() => {
       renderAttachmentTray();
       if (!chatEl.children.length) {
         addMeta("Cortex Engine by Trent DeRosa — ask anything, attach files, or pick a starter prompt below.");

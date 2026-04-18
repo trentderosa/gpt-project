@@ -338,11 +338,40 @@ class ChatStorage:
             rows = conn.execute(query, tuple(params)).fetchall()
         return [{"role": row["role"], "content": row["content"]} for row in rows]
 
+    def claim_anonymous_conversation(self, conversation_id: str, user_id: int) -> bool:
+        """Retroactively link an anonymous conversation to a user after login."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT user_id FROM conversations WHERE id = ?",
+                (conversation_id,),
+            ).fetchone()
+            if not row:
+                return False
+            if row["user_id"] is not None:
+                return False  # Already owned; don't override.
+            cur = conn.execute(
+                "UPDATE conversations SET user_id = ? WHERE id = ? AND user_id IS NULL",
+                (user_id, conversation_id),
+            )
+            return cur.rowcount > 0
+
+    def claim_anonymous_conversations(self, conversation_ids: list[str], user_id: int) -> list[str]:
+        """Claim multiple anonymous conversations from the same browser after login."""
+        claimed: list[str] = []
+        for conversation_id in conversation_ids:
+            normalized = (conversation_id or "").strip()
+            if not normalized:
+                continue
+            if self.claim_anonymous_conversation(normalized, user_id):
+                claimed.append(normalized)
+        return claimed
+
     def list_conversations(
         self,
         limit: int = 30,
         user_id: int | None = None,
         workspace_id: str | None = None,
+        include_conversation_ids: list[str] | None = None,
     ) -> list[dict]:
         query = """
             SELECT
@@ -363,7 +392,12 @@ class ChatStorage:
         """
         clauses: list[str] = []
         params: list[object] = []
-        if user_id is not None:
+        if user_id is not None and include_conversation_ids:
+            placeholders = ",".join("?" * len(include_conversation_ids))
+            clauses.append(f"(c.user_id = ? OR (c.user_id IS NULL AND c.id IN ({placeholders})))")
+            params.append(user_id)
+            params.extend(include_conversation_ids)
+        elif user_id is not None:
             clauses.append("c.user_id = ?")
             params.append(user_id)
         if workspace_id is not None:

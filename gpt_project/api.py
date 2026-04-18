@@ -613,6 +613,66 @@ def _build_personal_knowledge_context(user_id: int) -> str:
     return "\n\n".join(parts)
 
 
+def _build_user_memory_context(user_profile: dict) -> tuple[str, dict]:
+    profile = dict(user_profile or {})
+    lines = ["User memory (durable across sessions):"]
+    facts = [str(item).strip() for item in profile.get("facts", []) if str(item).strip()]
+    style = profile.get("style") if isinstance(profile.get("style"), dict) else {}
+    has_content = False
+    if profile.get("name"):
+        lines.append(f"- Name: {profile['name']}")
+        has_content = True
+    if facts:
+        lines.append("- Durable facts: " + " | ".join(facts[-8:]))
+        has_content = True
+    if style:
+        style_bits = []
+        if style.get("vibe"):
+            style_bits.append(f"vibe={style['vibe']}")
+        if style.get("avg_words_per_message") is not None:
+            style_bits.append(f"avg_words={style['avg_words_per_message']}")
+        if style.get("lowercase_ratio") is not None:
+            style_bits.append(f"lowercase_ratio={style['lowercase_ratio']}")
+        if style_bits:
+            lines.append("- Preferences/style: " + ", ".join(style_bits))
+            has_content = True
+    if not has_content:
+        return "", {"name": None, "facts": [], "style": {}}
+    return "\n".join(lines) + "\n\n", {
+        "name": profile.get("name"),
+        "facts": facts[-8:],
+        "style": style,
+    }
+
+
+def _build_user_history_context(
+    user_id: int,
+    question: str,
+    exclude_conversation_id: str | None = None,
+) -> str:
+    """Load recent messages from past conversations for cross-session continuity.
+    Used when no workspace is active so the user's prior work is still in context.
+    """
+    recent_convos = storage.list_conversations(limit=5, user_id=user_id)
+    lines: list[str] = []
+    for convo in recent_convos:
+        cid = convo["conversation_id"]
+        if cid == exclude_conversation_id:
+            continue
+        msgs = storage.get_messages(cid, limit=6)
+        if not msgs:
+            continue
+        date = (convo.get("last_message_at") or convo.get("created_at") or "")[:10]
+        title = convo.get("title") or convo.get("preview") or "Past conversation"
+        lines.append(f"[{date}] {title}:")
+        for m in msgs[-4:]:
+            role_label = "You" if m["role"] == "user" else "Cortex"
+            lines.append(f"  {role_label}: {m['content'][:200]}")
+    if not lines:
+        return ""
+    return "Recent conversation history (for continuity — use if relevant):\n" + "\n".join(lines) + "\n\n"
+
+
 def _build_workspace_context_block(
     workspace: dict | None,
     question: str,
@@ -645,6 +705,52 @@ def _build_workspace_context_block(
         "memory_hits": memory_hits,
         "file_hits": file_hits,
     }
+
+
+def _load_memory_context_rings(
+    *,
+    user: dict | None,
+    workspace: dict | None,
+    question: str,
+    exclude_conversation_id: str | None = None,
+    current_history_count: int = 0,
+) -> tuple[str, dict]:
+    sections: list[str] = []
+    meta: dict[str, object] = {
+        "workspace": {"summary": None, "memory_hits": [], "file_hits": []},
+        "user": {"name": None, "facts": [], "style": {}},
+        "recent_history_loaded": False,
+    }
+
+    if workspace:
+        workspace_context, workspace_meta = _build_workspace_context_block(
+            workspace=workspace,
+            question=question,
+            exclude_conversation_id=exclude_conversation_id,
+        )
+        if workspace_context:
+            sections.append(workspace_context)
+        meta["workspace"] = workspace_meta
+
+    if user:
+        user_profile = storage.get_user_memory(int(user["id"]))
+        user_memory_context, user_memory_meta = _build_user_memory_context(user_profile)
+        if user_memory_context:
+            sections.append(user_memory_context)
+        meta["user"] = user_memory_meta
+
+        should_load_recent_history = (not workspace) or current_history_count <= 2
+        if should_load_recent_history:
+            recent_history_context = _build_user_history_context(
+                user_id=int(user["id"]),
+                question=question,
+                exclude_conversation_id=exclude_conversation_id,
+            )
+            if recent_history_context:
+                sections.append(recent_history_context)
+                meta["recent_history_loaded"] = True
+
+    return "".join(sections), meta
 
 
 def _refresh_workspace_summary(workspace: dict, conversation_id: str) -> None:
@@ -1436,17 +1542,55 @@ def delete_conversation(conversation_id: str, request: Request) -> dict:
 
 
 @app.get("/conversations", response_model=ConversationListResponse)
-def list_conversations(request: Request, limit: int = 30, workspace_id: str | None = None) -> ConversationListResponse:
+def list_conversations(
+    request: Request,
+    limit: int = 30,
+    workspace_id: str | None = None,
+    include_ids: str | None = None,
+) -> ConversationListResponse:
     user = _current_user(request)
     if user is None:
         return ConversationListResponse(conversations=[])
     resolved_workspace_id = (workspace_id or "").strip() or None
+    extra_ids = [i.strip() for i in (include_ids or "").split(",") if i.strip()] or None
     if resolved_workspace_id:
         _workspace_access_check(resolved_workspace_id, user)
         conversations = storage.list_conversations(limit=limit, workspace_id=resolved_workspace_id)
     else:
-        conversations = storage.list_conversations(limit=limit, user_id=int(user["id"]))
+        conversations = storage.list_conversations(
+            limit=limit,
+            user_id=int(user["id"]),
+            include_conversation_ids=extra_ids,
+        )
     return ConversationListResponse(conversations=conversations)
+
+
+class ClaimConversationRequest(BaseModel):
+    conversation_id: str = Field(min_length=10, max_length=40)
+
+
+@app.post("/conversations/claim")
+def claim_conversation(body: ClaimConversationRequest, request: Request) -> dict:
+    """Retroactively link an anonymous (pre-login) conversation to the current user."""
+    user = _current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required.")
+    claimed = storage.claim_anonymous_conversation(body.conversation_id, int(user["id"]))
+    return {"claimed": claimed, "conversation_id": body.conversation_id}
+
+
+class ClaimConversationsRequest(BaseModel):
+    conversation_ids: list[str] = Field(default_factory=list, max_length=50)
+
+
+@app.post("/conversations/claim_many")
+def claim_conversations(body: ClaimConversationsRequest, request: Request) -> dict:
+    user = _current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required.")
+    conversation_ids = [str(item).strip() for item in body.conversation_ids if str(item).strip()]
+    claimed_ids = storage.claim_anonymous_conversations(conversation_ids, int(user["id"]))
+    return {"claimed_ids": claimed_ids, "requested_count": len(conversation_ids)}
 
 
 @app.get("/live/stocks", response_model=LiveDataResponse)
@@ -1544,11 +1688,14 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
         _kctx = _build_personal_knowledge_context(int(user["id"]))
         if _kctx:
             uploaded_file_context = (uploaded_file_context or "") + "\n\n" + _kctx
-    workspace_context, _workspace_meta = _build_workspace_context_block(
+    memory_context, _memory_meta = _load_memory_context_rings(
+        user=user,
         workspace=workspace,
         question=sanitized_message,
         exclude_conversation_id=conversation_id,
+        current_history_count=len(history),
     )
+
     raw_message = sanitized_message
     image_prompt = _extract_image_prompt(raw_message)
 
@@ -1617,7 +1764,7 @@ def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
             user_location_label=chat_request.user_location_label,
             user_profile=merged_profile,
             uploaded_file_context=uploaded_file_context,
-            workspace_context=workspace_context,
+            workspace_context=memory_context,
             model=active_model,
         )
     except AuthenticationError as exc:
@@ -1713,11 +1860,14 @@ def chat_stream(chat_request: ChatRequest, request: Request):
         _kctx = _build_personal_knowledge_context(int(user["id"]))
         if _kctx:
             uploaded_file_context = (uploaded_file_context or "") + "\n\n" + _kctx
-    workspace_context, _workspace_meta = _build_workspace_context_block(
+    memory_context, _memory_meta = _load_memory_context_rings(
+        user=user,
         workspace=workspace,
         question=sanitized_message,
         exclude_conversation_id=conversation_id,
+        current_history_count=len(history),
     )
+
     chat_request.conversation_id = conversation_id
     chat_request.workspace_id = workspace["id"] if workspace else chat_request.workspace_id
     image_prompt = _extract_image_prompt(sanitized_message)
@@ -1751,7 +1901,7 @@ def chat_stream(chat_request: ChatRequest, request: Request):
                 user_location_label=chat_request.user_location_label,
                 user_profile=merged_profile,
                 uploaded_file_context=uploaded_file_context,
-                workspace_context=workspace_context,
+                workspace_context=memory_context,
                 model=active_model,
             ):
                 if event_type == "token":
@@ -1885,6 +2035,7 @@ def create_workspace(body: CreateWorkspaceRequest, request: Request) -> dict:
         name=body.name.strip(),
         owner_user_id=int(user["id"]),
     )
+    workspace["role"] = "owner"
     return workspace
 
 
