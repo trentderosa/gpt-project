@@ -973,7 +973,7 @@
     const SIDEBAR_KEY = "cortex_sidebar_hidden";
     const DARK_KEY = "cortex_dark_mode";
     const MODEL_KEY = "cortex_model";
-    const WORKSPACE_KEY = "cortex_active_workspace_id";
+    const PROJECT_KEY = "cortex_active_workspace_id";
 
     let conversationId = localStorage.getItem(KEY) || null;
     let currentUser = null;
@@ -1008,7 +1008,8 @@
     const uploadWorkspaceNoteBtnEl = document.getElementById("uploadWorkspaceNoteBtn");
     const workspaceNoteFileInputEl = document.getElementById("workspaceNoteFileInput");
     const headerWorkspaceBadgeEl = document.getElementById("headerWorkspaceBadge");
-    let activeWorkspace = null;
+    let activeProjectId = null;
+    let projects = [];
     let workspaceCreatorOpen = false;
     let lastUserMessage = null;
     let lastBotBubble = null;
@@ -1048,14 +1049,12 @@
     }
 
     function renderWorkspaceIndicators() {
-      const hasWorkspace = !!activeWorkspace;
-      if (workspaceActiveBarEl) workspaceActiveBarEl.classList.toggle("visible", hasWorkspace);
-      if (workspaceActiveBadgeEl) {
-        workspaceActiveBadgeEl.textContent = hasWorkspace ? activeWorkspace.name : "";
-      }
+      const active = projects.find(p => p.id === activeProjectId) || null;
+      if (workspaceActiveBarEl) workspaceActiveBarEl.classList.toggle("visible", !!active);
+      if (workspaceActiveBadgeEl) workspaceActiveBadgeEl.textContent = active?.name || "";
       if (headerWorkspaceBadgeEl) {
-        headerWorkspaceBadgeEl.style.display = hasWorkspace ? "" : "none";
-        headerWorkspaceBadgeEl.textContent = hasWorkspace ? `Project: ${activeWorkspace.name}` : "";
+        headerWorkspaceBadgeEl.style.display = active ? "" : "none";
+        headerWorkspaceBadgeEl.textContent = active ? `Project: ${active.name}` : "";
       }
     }
 
@@ -1218,7 +1217,8 @@
       if (!loggedIn) {
         authStatusEl.textContent = "Not logged in. Free mode may be limited.";
         if (notesListEl) notesListEl.innerHTML = "";
-        activeWorkspace = null;
+        activeProjectId = null;
+        projects = [];
         setWorkspaceCreatorOpen(false);
         if (activeWorkspacePanelEl) activeWorkspacePanelEl.style.display = "none";
         if (activeWorkspaceSummaryEl) activeWorkspaceSummaryEl.textContent = "";
@@ -1549,7 +1549,7 @@
             const formData = new FormData();
             formData.append("file", file);
             if (conversationId) formData.append("conversation_id", conversationId);
-            if (activeWorkspace?.id) formData.append("workspace_id", activeWorkspace.id);
+            if (activeProjectId) formData.append("workspace_id", activeProjectId);
             const uploadRes = await apiFetch("/upload", { method: "POST", body: formData });
             const uploadData = await uploadRes.json();
             if (!uploadRes.ok) {
@@ -1575,7 +1575,7 @@
           body: JSON.stringify({
             message,
             conversation_id: conversationId,
-            workspace_id: activeWorkspace?.id || null,
+            workspace_id: activeProjectId || null,
             use_web_search: webSearchEl.checked,
             user_timezone: browserTimeZone,
             user_utc_offset_minutes: browserUtcOffsetMinutes,
@@ -1679,13 +1679,14 @@
           return;
         }
         const data = await res.json();
-        if (data.workspace_id && currentUser) {
-          await setActiveWorkspace(
-            { id: data.workspace_id, name: activeWorkspace?.name || "Project" },
-            { keepConversation: true, preserveChat: true, announce: false }
-          );
-        } else if (!data.workspace_id && activeWorkspace) {
-          clearActiveWorkspace({ resetConversation: false, clearChat: false, announce: false });
+        // Sync project state to match the loaded conversation without triggering any cascade.
+        if (data.workspace_id && data.workspace_id !== activeProjectId) {
+          const match = projects.find(p => p.id === data.workspace_id);
+          if (match) {
+            activeProjectId = data.workspace_id;
+            localStorage.setItem(PROJECT_KEY, activeProjectId);
+            renderWorkspaceIndicators();
+          }
         }
         chatEl.innerHTML = "";
         for (const msg of data.messages.slice(-60)) {
@@ -1728,9 +1729,9 @@
 
     async function refreshConversationList() {
       try {
-        const includeIds = !activeWorkspace ? loadRecentConversationIds().join(",") : "";
-        const query = activeWorkspace?.id
-          ? `/conversations?limit=50&workspace_id=${encodeURIComponent(activeWorkspace.id)}`
+        const includeIds = !activeProjectId ? loadRecentConversationIds().join(",") : "";
+        const query = activeProjectId
+          ? `/conversations?limit=50&workspace_id=${encodeURIComponent(activeProjectId)}`
           : `/conversations?limit=50${includeIds ? `&include_ids=${encodeURIComponent(includeIds)}` : ""}`;
         const res = await apiFetch(query);
         if (!res.ok) return;
@@ -1746,7 +1747,7 @@
           const btn = document.createElement("button");
           btn.className = "history-item-btn";
           if (convo.conversation_id === conversationId) btn.classList.add("active");
-          const workspaceTag = convo.workspace_id ? " • workspace" : "";
+          const workspaceTag = convo.workspace_id ? " • project" : "";
           btn.innerHTML = `<span class="history-preview">${escapeHtml(convo.title || convo.preview || "New conversation")}</span><span class="history-time">${fmtDate(convo.last_message_at || convo.created_at)}${workspaceTag}</span>`;
           btn.addEventListener("click", async () => {
             setConversationId(convo.conversation_id);
@@ -1821,8 +1822,9 @@
       uploadedFileNames = [];
       fileInputEl.value = "";
       renderAttachmentTray();
-      if (activeWorkspace) {
-        addMeta(`New workspace chat started in ${activeWorkspace.name}.`);
+      const _activeProj = projects.find(p => p.id === activeProjectId);
+      if (_activeProj) {
+        addMeta(`New chat started in project "${_activeProj.name}".`);
       } else {
         addMeta("New conversation started.");
       }
@@ -1911,7 +1913,7 @@
           else { setConversationId(null); }
         } else { setConversationId(null); }
         await refreshNotes();
-        await refreshWorkspaces();
+        await loadProjects();
         await refreshConversationList();
       } catch (err) {
         addBubble("Error: " + err.message, "bot", "error");
@@ -2085,149 +2087,156 @@
       noteFileInputEl.value = "";
     });
 
-    async function loadWorkspaceDetail(workspaceId) {
-      if (!workspaceId) return null;
-      try {
-        const res = await apiFetch("/workspaces/" + workspaceId);
-        if (!res.ok) return null;
-        const data = await res.json();
-        activeWorkspace = data.workspace || activeWorkspace;
-        if (activeWorkspace) {
-          localStorage.setItem(WORKSPACE_KEY, activeWorkspace.id);
-          if (activeWorkspaceNameEl) activeWorkspaceNameEl.textContent = activeWorkspace.name;
-          if (activeWorkspacePanelEl) activeWorkspacePanelEl.style.display = "";
-          if (activeWorkspaceSummaryEl) activeWorkspaceSummaryEl.textContent = data.summary?.summary_text || "Project memory is active. All chats inside this project share context.";
-          renderWorkspaceConversationList(data.conversations || []);
-          renderWorkspaceIndicators();
-        }
-        return data;
-      } catch (_) {
-        return null;
+    function renderProjectsList() {
+      if (!workspaceListEl) return;
+      workspaceListEl.innerHTML = "";
+      if (!projects.length) {
+        workspaceListEl.innerHTML = "<li class='workspace-empty'>No projects yet. Press + New to create one.</li>";
+        return;
+      }
+      for (const p of projects) {
+        const li = document.createElement("li");
+        const isActive = p.id === activeProjectId;
+        li.className = "workspace-item" + (isActive ? " active" : "");
+        li.style.cursor = "pointer";
+        const count = Number(p.conversation_count || 0);
+        li.innerHTML = `<span class="workspace-item-name" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</span><span class="workspace-item-meta">${count} chat${count !== 1 ? "s" : ""}</span>`;
+        li.addEventListener("click", () => activateProject(p.id));
+        workspaceListEl.appendChild(li);
       }
     }
 
-    async function refreshWorkspaces() {
+    function renderProjectFilesList(files) {
+      if (!workspaceFilesListEl) return;
+      workspaceFilesListEl.innerHTML = "";
+      if (!files.length) {
+        workspaceFilesListEl.innerHTML = "<li style='font-size:11px;color:var(--muted);padding:4px 0;'>No files yet.</li>";
+        return;
+      }
+      for (const f of files) {
+        const li = document.createElement("li");
+        li.className = "knowledge-item";
+        li.innerHTML = `<span class="knowledge-item-name" title="${escapeHtml(f.filename)}">${escapeHtml(f.filename)}</span>`;
+        workspaceFilesListEl.appendChild(li);
+      }
+    }
+
+    async function loadProjects() {
       if (!currentUser || !workspaceListEl) return;
       try {
         const res = await apiFetch("/workspaces");
         if (!res.ok) return;
         const data = await res.json();
-        const savedWorkspaceId = localStorage.getItem(WORKSPACE_KEY);
-        const targetWorkspaceId = activeWorkspace?.id || savedWorkspaceId || null;
-        let restoredWorkspace = null;
-        workspaceListEl.innerHTML = "";
-        for (const ws of data.workspaces || []) {
-          const li = document.createElement("li");
-          const isActive = !!targetWorkspaceId && targetWorkspaceId === ws.id;
-          li.className = "workspace-item" + (isActive ? " active" : "");
-          li.style.cursor = "pointer";
-          const convoCount = Number(ws.conversation_count || 0);
-          li.innerHTML = `<span class="workspace-item-name" title="${escapeHtml(ws.name)}">${escapeHtml(ws.name)}</span><span class="workspace-item-meta">${convoCount} chat${convoCount !== 1 ? "s" : ""}</span>`;
-          li.addEventListener("click", () => setActiveWorkspace(ws, { announce: !isActive, keepConversation: isActive, preserveChat: isActive }));
-          workspaceListEl.appendChild(li);
-          if (isActive) {
-            restoredWorkspace = ws;
+        projects = data.workspaces || [];
+
+        // Restore saved project from localStorage if not already set.
+        if (!activeProjectId) {
+          const saved = localStorage.getItem(PROJECT_KEY);
+          if (saved && projects.find(p => p.id === saved)) {
+            activeProjectId = saved;
           }
         }
-        if (!(data.workspaces || []).length) {
-          workspaceListEl.innerHTML = "<li class='workspace-empty'>No projects yet. Press + New to create one.</li>";
-          renderWorkspaceConversationList([]);
-        }
-        if (restoredWorkspace) {
-          activeWorkspace = restoredWorkspace;
-          renderWorkspaceIndicators();
-          await loadWorkspaceDetail(activeWorkspace.id);
-          await refreshWorkspaceFiles();
-        } else if (savedWorkspaceId) {
-          activeWorkspace = null;
-          localStorage.removeItem(WORKSPACE_KEY);
-          if (activeWorkspaceNameEl) activeWorkspaceNameEl.textContent = "";
-          if (activeWorkspaceSummaryEl) activeWorkspaceSummaryEl.textContent = "";
+
+        renderProjectsList();
+        renderWorkspaceIndicators();
+
+        // Load detail for active project (only once, no cascade).
+        if (activeProjectId) {
+          await loadProjectDetail(activeProjectId);
+        } else {
           if (activeWorkspacePanelEl) activeWorkspacePanelEl.style.display = "none";
           renderWorkspaceConversationList([]);
-          renderWorkspaceIndicators();
         }
       } catch (_) {}
     }
 
-    function clearActiveWorkspace(options = {}) {
-      const {
-        resetConversation = true,
-        clearChat = true,
-        announce = true,
-      } = options;
-      activeWorkspace = null;
-      localStorage.removeItem(WORKSPACE_KEY);
+    async function loadProjectDetail(projectId) {
+      if (!projectId) return;
+      try {
+        const res = await apiFetch("/workspaces/" + projectId);
+        if (!res.ok) return;
+        const data = await res.json();
+        const p = data.workspace;
+        // Keep local projects[] cache fresh.
+        const idx = projects.findIndex(x => x.id === projectId);
+        if (idx >= 0) projects[idx] = { ...projects[idx], ...p };
+        // Only update the panel if this project is still active.
+        if (activeProjectId !== projectId) return;
+        if (activeWorkspaceNameEl) activeWorkspaceNameEl.textContent = p.name || "";
+        if (activeWorkspacePanelEl) activeWorkspacePanelEl.style.display = "";
+        if (activeWorkspaceSummaryEl) activeWorkspaceSummaryEl.textContent = data.summary?.summary_text || "Project memory is active. All chats inside this project share context.";
+        renderWorkspaceConversationList(data.conversations || []);
+        renderProjectFilesList([...(data.files || []), ...(data.uploaded_files || [])]);
+        renderProjectsList();
+      } catch (_) {}
+    }
+
+    async function activateProject(projectId, options = {}) {
+      const { announce = true, keepConversation = false, preserveChat = false } = options;
+      if (activeProjectId === projectId) return;
+      activeProjectId = projectId;
+      localStorage.setItem(PROJECT_KEY, projectId);
+      setWorkspaceCreatorOpen(false);
+      if (!keepConversation) setConversationId(null);
+      if (!preserveChat) chatEl.innerHTML = "";
+      const proj = projects.find(p => p.id === projectId);
+      if (announce && proj) addMeta(`Project "${proj.name}" is active. New chats will stay inside this project.`);
+      renderProjectsList();
+      renderWorkspaceIndicators();
+      await loadProjectDetail(projectId);
+      await refreshConversationList();
+    }
+
+    function leaveProject(options = {}) {
+      const { announce = true, resetConversation = true, clearChat = true } = options;
+      activeProjectId = null;
+      localStorage.removeItem(PROJECT_KEY);
+      if (activeWorkspacePanelEl) activeWorkspacePanelEl.style.display = "none";
       if (activeWorkspaceNameEl) activeWorkspaceNameEl.textContent = "";
       if (activeWorkspaceSummaryEl) activeWorkspaceSummaryEl.textContent = "";
-      if (activeWorkspacePanelEl) activeWorkspacePanelEl.style.display = "none";
       if (workspaceFilesListEl) workspaceFilesListEl.innerHTML = "";
       if (inviteEmailEl) inviteEmailEl.value = "";
       renderWorkspaceConversationList([]);
+      renderProjectsList();
       renderWorkspaceIndicators();
       if (resetConversation) setConversationId(null);
       if (clearChat) chatEl.innerHTML = "";
       if (announce) addMeta("Left project. You're back in general chat — account memory still applies.");
-      refreshWorkspaces();
       refreshConversationList();
     }
 
-    async function setActiveWorkspace(ws, options = {}) {
-      const {
-        keepConversation = false,
-        preserveChat = false,
-        announce = true,
-      } = options;
-      activeWorkspace = ws ? { ...activeWorkspace, ...ws } : null;
-      if (!activeWorkspace?.id) return;
-      localStorage.setItem(WORKSPACE_KEY, activeWorkspace.id);
-      setWorkspaceCreatorOpen(false);
-      if (activeWorkspaceNameEl) activeWorkspaceNameEl.textContent = activeWorkspace.name || "Project";
-      if (activeWorkspacePanelEl) activeWorkspacePanelEl.style.display = "";
-      if (activeWorkspaceSummaryEl) activeWorkspaceSummaryEl.textContent = "Project memory is active. All chats inside share context.";
-      renderWorkspaceIndicators();
-      if (!keepConversation) setConversationId(null);
-      if (!preserveChat) chatEl.innerHTML = "";
-      if (announce) addMeta(`Project "${activeWorkspace.name}" is active. New chats will stay inside this project.`);
-      await loadWorkspaceDetail(activeWorkspace.id);
-      await refreshWorkspaceFiles();
-      await refreshWorkspaces();
-      await refreshConversationList();
+    async function createProject(name) {
+      try {
+        const res = await apiFetch("/workspaces", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: name.trim() }),
+        });
+        if (!res.ok) {
+          const d = await res.json();
+          addBubble("Error: " + (d.detail || "Could not create project"), "bot", "error");
+          return null;
+        }
+        const workspace = await res.json();
+        // Prepend to local cache so it shows immediately without refetching the list.
+        projects.unshift({ ...workspace, conversation_count: 0 });
+        if (newWorkspaceNameEl) newWorkspaceNameEl.value = "";
+        setWorkspaceCreatorOpen(false);
+        await activateProject(workspace.id, { announce: true });
+        return workspace;
+      } catch (err) {
+        addBubble("Error: " + err.message, "bot", "error");
+        return null;
+      }
     }
 
     async function refreshWorkspaceFiles() {
-      if (!activeWorkspace || !workspaceFilesListEl) return;
-      try {
-        const res = await apiFetch("/workspaces/" + activeWorkspace.id + "/knowledge");
-        if (!res.ok) return;
-        const data = await res.json();
-        workspaceFilesListEl.innerHTML = "";
-        const combined = [...(data.files || []), ...(data.uploaded_files || [])];
-        if (!combined.length) {
-          workspaceFilesListEl.innerHTML = "<li style='font-size:11px;color:var(--muted);padding:4px 0;'>No files yet.</li>";
-          return;
-        }
-        for (const f of combined) {
-          const li = document.createElement("li");
-          li.className = "knowledge-item";
-          li.innerHTML = `<span class="knowledge-item-name" title="${escapeHtml(f.filename)}">${escapeHtml(f.filename)}</span>`;
-          workspaceFilesListEl.appendChild(li);
-        }
-      } catch (_) {}
+      await loadProjectDetail(activeProjectId);
     }
 
-    createWorkspaceBtnEl.addEventListener("click", async () => {
-      const name = (newWorkspaceNameEl.value || "").trim();
-      if (!name) return;
-      try {
-        const res = await apiFetch("/workspaces", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
-        if (!res.ok) { const d = await res.json(); addBubble("Error: " + (d.detail || "Could not create workspace"), "bot", "error"); return; }
-        const workspace = await res.json();
-        newWorkspaceNameEl.value = "";
-        setWorkspaceCreatorOpen(false);
-        await refreshWorkspaces();
-        await setActiveWorkspace(workspace);
-      } catch (err) { addBubble("Error: " + err.message, "bot", "error"); }
+    createWorkspaceBtnEl?.addEventListener("click", async () => {
+      const name = (newWorkspaceNameEl?.value || "").trim();
+      if (name) await createProject(name);
     });
     workspaceToggleBtnEl?.addEventListener("click", () => {
       setWorkspaceCreatorOpen(!workspaceCreatorOpen);
@@ -2235,40 +2244,38 @@
     headerWorkspaceBadgeEl?.addEventListener("click", () => {
       workspaceSectionEl?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     });
-    leaveWorkspaceBtnEl?.addEventListener("click", () => clearActiveWorkspace());
+    leaveWorkspaceBtnEl?.addEventListener("click", () => leaveProject());
     newWorkspaceNameEl?.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        createWorkspaceBtnEl.click();
-      }
+      if (e.key === "Enter") { e.preventDefault(); createWorkspaceBtnEl?.click(); }
     });
 
-    inviteBtnEl.addEventListener("click", async () => {
-      if (!activeWorkspace) return;
-      const email = (inviteEmailEl.value || "").trim();
+    inviteBtnEl?.addEventListener("click", async () => {
+      if (!activeProjectId) return;
+      const email = (inviteEmailEl?.value || "").trim();
       if (!email) return;
       try {
-        const res = await apiFetch("/workspaces/" + activeWorkspace.id + "/invite", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email }) });
+        const proj = projects.find(p => p.id === activeProjectId);
+        const res = await apiFetch("/workspaces/" + activeProjectId + "/invite", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email }) });
         const d = await res.json();
         if (!res.ok) { addBubble("Invite failed: " + (d.detail || "Unknown error"), "bot", "error"); return; }
-        addBubble("Invited " + d.email + " to " + activeWorkspace.name + ".", "bot");
-        inviteEmailEl.value = "";
+        addBubble("Invited " + d.email + (proj ? " to " + proj.name : "") + ".", "bot");
+        if (inviteEmailEl) inviteEmailEl.value = "";
       } catch (err) { addBubble("Error: " + err.message, "bot", "error"); }
     });
 
-    uploadWorkspaceNoteBtnEl.addEventListener("click", () => workspaceNoteFileInputEl.click());
-    workspaceNoteFileInputEl.addEventListener("change", async () => {
-      const file = workspaceNoteFileInputEl.files?.[0];
-      if (!file || !activeWorkspace) return;
+    uploadWorkspaceNoteBtnEl?.addEventListener("click", () => workspaceNoteFileInputEl?.click());
+    workspaceNoteFileInputEl?.addEventListener("change", async () => {
+      const file = workspaceNoteFileInputEl?.files?.[0];
+      if (!file || !activeProjectId) return;
       const fd = new FormData();
       fd.append("file", file);
-      fd.append("workspace_id", activeWorkspace.id);
+      fd.append("workspace_id", activeProjectId);
       try {
         const res = await apiFetch("/knowledge", { method: "POST", body: fd });
         if (!res.ok) { const d = await res.json(); addBubble("Upload failed: " + (d.detail || "Unknown error"), "bot", "error"); return; }
-        await refreshWorkspaceFiles();
+        await loadProjectDetail(activeProjectId);
       } catch (err) { addBubble("Upload error: " + err.message, "bot", "error"); }
-      workspaceNoteFileInputEl.value = "";
+      if (workspaceNoteFileInputEl) workspaceNoteFileInputEl.value = "";
     });
 
     initLocationHint();
@@ -2277,7 +2284,7 @@
     (async () => {
       await refreshAuthRuntime();
       await refreshMe();
-      await Promise.all([loadConversation(), refreshConversationList(), refreshNotes(), refreshWorkspaces()]);
+      await Promise.all([loadConversation(), refreshConversationList(), refreshNotes(), loadProjects()]);
     })().finally(() => {
       renderAttachmentTray();
       if (!chatEl.children.length) {
