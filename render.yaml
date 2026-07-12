@@ -37,6 +37,12 @@ services:
         value: /var/data/gpt_project.db
       - key: CREATOR_EMAIL
         sync: false
+      - key: CREATOR_PASSWORD
+        sync: false
+      - key: CREATOR_BOOTSTRAP_SECRET
+        sync: false
+      - key: PASSWORD_RESET_DEV_MODE
+        value: "false"
       - key: STRIPE_SECRET_KEY
         sync: false
       - key: STRIPE_WEBHOOK_SECRET
