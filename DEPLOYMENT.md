@@ -27,6 +27,9 @@ Keep the app online 24/7 and keep live data (news/stocks) updated even when your
 - `TAVILY_API_KEY`: optional primary live search provider.
 - `DB_PATH`: shared database file path if both API and worker run on same machine.
 - `CREATOR_EMAIL`: your creator/admin email for unlimited access.
+- `CREATOR_PASSWORD`: required for deterministic creator login in production. If omitted, creator login depends on the existing stored password hash and cannot be auto-healed on deploy.
+- `CREATOR_BOOTSTRAP_SECRET`: optional legacy bootstrap secret. Recommended to keep set but unused for normal login.
+- `PASSWORD_RESET_DEV_MODE`: leave `false` in production. The browser should not expose direct email reset when this is off.
 - `STRIPE_SECRET_KEY`: Stripe secret API key (`sk_live_...` in production).
 - `STRIPE_WEBHOOK_SECRET`: webhook signing secret for `/billing/webhook`.
 - `STRIPE_PRICE_PRO5_ID`: Stripe Price ID for your $5 plan.
